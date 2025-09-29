@@ -335,6 +335,31 @@ func (b *Backend) parseDerivedTxFromAdditionalFields(
 	ethMsg.From = additional.Sender.Hex()
 	return ethMsg
 }
+func (b *Backend) parseDerivedTxFromAdditionalFieldsForTrace(
+	additional *rpctypes.TxResultAdditionalFields,
+) *evmtypes.MsgEthereumTx {
+	recipient := additional.Recipient
+	t := ethtypes.NewTx(&ethtypes.LegacyTx{
+		Nonce:    additional.Nonce,
+		Data:     additional.Data,
+		Gas:      additional.GasUsed,
+		To:       &recipient,
+		GasPrice: nil,
+		Value:    additional.Value,
+		V:        big.NewInt(27),
+		R:        big.NewInt(1),
+		S:        big.NewInt(1),
+	})
+	ethMsg := &evmtypes.MsgEthereumTx{}
+	err := ethMsg.FromEthereumTx(t)
+	if err != nil {
+		b.logger.Error("can not create eth msg", err.Error())
+		return nil
+	}
+	ethMsg.Hash = additional.Hash.Hex()
+	ethMsg.From = additional.Sender.Hex()
+	return ethMsg
+}
 
 // HeaderByNumber returns the block header identified by height.
 func (b *Backend) HeaderByNumber(blockNum rpctypes.BlockNumber) (*ethtypes.Header, error) {
