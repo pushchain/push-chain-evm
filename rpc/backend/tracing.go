@@ -23,8 +23,6 @@ func (b *Backend) TraceTransaction(hash common.Hash, config *evmtypes.TraceConfi
 		b.logger.Debug("tx not found", "hash", hash)
 		return nil, err
 	}
-	fmt.Println("stage 1 (additionals) : ", additional)
-	fmt.Println("stage 2 (transaction) : ", transaction)
 
 	// check if block number is 0
 	if transaction.Height == 0 {
@@ -36,11 +34,6 @@ func (b *Backend) TraceTransaction(hash common.Hash, config *evmtypes.TraceConfi
 		b.logger.Debug("block not found", "height", transaction.Height)
 		return nil, err
 	}
-	fmt.Println("checking Block : ", blk)
-	fmt.Println("transaction : ", transaction)
-	fmt.Println("Transaction_index", transaction.TxIndex)
-	fmt.Println("Transaction_index", transaction.EthTxIndex)
-	fmt.Println("checking Blocks inside : ", blk.Block.Txs)
 
 	// check tx index is not out of bound
 	if len(blk.Block.Txs) > math.MaxUint32 {
@@ -53,21 +46,6 @@ func (b *Backend) TraceTransaction(hash common.Hash, config *evmtypes.TraceConfi
 	}
 
 	var predecessors []*evmtypes.MsgEthereumTx
-	// for _, txBz := range blk.Block.Txs[:transaction.TxIndex] { // (block.Block.Txs[res.TxIndex]
-	// 	tx, err := b.clientCtx.TxConfig.TxDecoder()(txBz)
-	// 	if err != nil {
-	// 		b.logger.Debug("failed to decode transaction in block", "height", blk.Block.Height, "error", err.Error())
-	// 		continue
-	// 	}
-	// 	for _, msg := range tx.GetMsgs() {
-	// 		ethMsg, ok := msg.(*evmtypes.MsgEthereumTx)
-	// 		if !ok {
-	// 			continue
-	// 		}
-
-	// 		predecessors = append(predecessors, ethMsg)
-	// 	}
-	// }
 	for i := 0; i < int(transaction.TxIndex); i++ {
 		_, txAdditional, err := b.GetTxByTxIndex(blk.Block.Height, uint(i))
 		if err != nil {
@@ -103,38 +81,29 @@ func (b *Backend) TraceTransaction(hash common.Hash, config *evmtypes.TraceConfi
 			}
 		}
 	}
-	fmt.Println("stage 3 (block predecessors) : ", predecessors)
 
 	tx, err := b.clientCtx.TxConfig.TxDecoder()(blk.Block.Txs[transaction.TxIndex])
 	if err != nil {
 		b.logger.Debug("tx not found", "hash", hash)
 		return nil, err
 	}
-	fmt.Println("decoded transaction (target) : ", tx.GetMsgs()[transaction.MsgIndex])
 
 	// add predecessor messages in current cosmos tx
 	index := int(transaction.MsgIndex) // #nosec G115
-	fmt.Println("checking index", index)
 
 	for i := 0; i < index; i++ {
 		msg := tx.GetMsgs()[i]
-		fmt.Println("predecessor number", i)
-
 		// Check if it’s a normal Ethereum tx
 		if ethMsg, ok := msg.(*evmtypes.MsgEthereumTx); ok {
-			fmt.Println("what! it is actually evm type mesage")
 			predecessors = append(predecessors, ethMsg)
 			continue
 		}
-
-		// Check if it’s a synthetic tx (custom Msg type)
-		// We need to fetch additional info for synthetic tx reconstruction
+		// Fetch additional data for predecessors
 		_, txAdditional, err := b.GetTxByEthHashAndMsgIndex(hash, i)
 		if err != nil {
 			b.logger.Debug("failed to get tx additional info", "error", err.Error())
 			continue
 		}
-		fmt.Println("subMsg additional  : ", txAdditional)
 
 		if txAdditional != nil {
 			ethMsg := b.parseDerivedTxFromAdditionalFieldsForTrace(txAdditional)
@@ -143,7 +112,6 @@ func (b *Backend) TraceTransaction(hash common.Hash, config *evmtypes.TraceConfi
 			}
 		}
 	}
-	fmt.Println("stage 4 (block+cosmostx predecessors) : ", predecessors)
 	var ethMessage *evmtypes.MsgEthereumTx
 	var ok bool
 
@@ -160,7 +128,6 @@ func (b *Backend) TraceTransaction(hash common.Hash, config *evmtypes.TraceConfi
 			return nil, fmt.Errorf("failed to get derived eth msg from additional fields")
 		}
 	}
-	fmt.Println("actual_message after parseDervied", ethMessage)
 
 	nc, ok := b.clientCtx.Client.(tmrpcclient.NetworkClient)
 	if !ok {
@@ -197,7 +164,6 @@ func (b *Backend) TraceTransaction(hash common.Hash, config *evmtypes.TraceConfi
 	if err != nil {
 		return nil, err
 	}
-	// fmt.Println("stage 5 (trace result) : ", traceResult)
 
 	// Response format is unknown due to custom tracer config param
 	// More information can be found here https://geth.ethereum.org/docs/dapp/tracing-filtered
@@ -206,7 +172,6 @@ func (b *Backend) TraceTransaction(hash common.Hash, config *evmtypes.TraceConfi
 	if err != nil {
 		return nil, err
 	}
-	// fmt.Println("stage 6 (decoded trace result) : ", decodedResult)
 
 	return decodedResult, nil
 }
