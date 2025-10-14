@@ -344,7 +344,7 @@ func (b *Backend) parseDerivedTxFromAdditionalFieldsForTrace(
 		Data:     additional.Data,
 		Gas:      additional.GasUsed,
 		To:       &recipient,
-		GasPrice: big.NewInt(2500000),
+		GasPrice: nil,
 		Value:    additional.Value,
 		V:        big.NewInt(27),
 		R:        big.NewInt(1),
