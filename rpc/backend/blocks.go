@@ -341,10 +341,12 @@ func (b *Backend) parseDerivedTxFromAdditionalFieldsForTrace(
 	additional *rpctypes.TxResultAdditionalFields,
 ) *evmtypes.MsgEthereumTx {
 	recipient := additional.Recipient
+
+	gas := additional.GasUsed + 10000 // buffer
 	t := ethtypes.NewTx(&ethtypes.LegacyTx{
 		Nonce:    additional.Nonce,
 		Data:     additional.Data,
-		Gas:      additional.GasUsed,
+		Gas:      gas,
 		To:       &recipient,
 		GasPrice: nil,
 		Value:    additional.Value,
@@ -358,7 +360,6 @@ func (b *Backend) parseDerivedTxFromAdditionalFieldsForTrace(
 		b.logger.Error("can not create eth msg", err.Error())
 		return nil
 	}
-	fmt.Println("ludwig : ", additional)
 	ethMsg.Hash = additional.Hash.Hex()
 	ethMsg.From = additional.Sender.Hex()
 	return ethMsg
