@@ -342,7 +342,11 @@ func (b *Backend) parseDerivedTxFromAdditionalFieldsForTrace(
 ) *evmtypes.MsgEthereumTx {
 	recipient := additional.Recipient
 
-	gas := additional.GasUsed + 10000 // buffer
+	// for transactions before v31 this value was mistakenly used for Gas field
+	gas := additional.GasUsed
+	if additional.GasLimit != nil {
+		gas = *additional.GasLimit
+	}
 	t := ethtypes.NewTx(&ethtypes.LegacyTx{
 		Nonce:    additional.Nonce,
 		Data:     additional.Data,
