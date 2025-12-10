@@ -18,8 +18,10 @@ import (
 
 	errorsmod "cosmossdk.io/errors"
 	"cosmossdk.io/math"
+	sdkmath "cosmossdk.io/math"
 
 	sdk "github.com/cosmos/cosmos-sdk/types"
+	authtypes "github.com/cosmos/cosmos-sdk/x/auth/types"
 )
 
 // NewEVM generates a go-ethereum VM from the provided Message fields and the chain parameters
@@ -242,6 +244,27 @@ func (k *Keeper) ApplyTransaction(ctx sdk.Context, tx *ethtypes.Transaction) (*t
 	// refund gas in order to match the Ethereum gas consumption instead of the default SDK one.
 	if err = k.RefundGas(ctx, msg, msg.Gas()-res.GasUsed, evmDenom); err != nil {
 		return nil, errorsmod.Wrapf(err, "failed to refund gas leftover gas to sender %s", msg.From())
+	}
+	// burn base fee (EIP-1559): baseFee * gasUsed
+	if cfg.BaseFee != nil && cfg.BaseFee.Sign() > 0 && res.GasUsed > 0 {
+		// compute amount = baseFee * gasUsed
+		burnAmt := new(big.Int).Mul(cfg.BaseFee, new(big.Int).SetUint64(res.GasUsed))
+
+		// create coin in EVM denom
+		burnCoin := sdk.Coin{Denom: types.GetEVMCoinDenom(), Amount: sdkmath.NewIntFromBigInt(burnAmt)}
+
+		// convert to extended denom (chain denom) and burn from fee collector
+		converted, err := types.ConvertEvmCoinDenomToExtendedDenom(burnCoin)
+		if err != nil {
+			// handle error (log and/or return). If you return, it may fail the tx; choose behavior.
+			k.Logger(ctx).Error("failed to convert evm denom for base fee burn", "err", err)
+		} else {
+			burnCoins := sdk.Coins{converted}
+			if err := k.bankWrapper.BurnCoins(ctx, authtypes.FeeCollectorName, burnCoins); err != nil {
+				// handle error - either log or return error. Logging avoids failing block.
+				k.Logger(ctx).Error("failed to burn base fee from fee collector", "err", err)
+			}
+		}
 	}
 
 	if len(logs) > 0 {
