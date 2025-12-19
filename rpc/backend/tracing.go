@@ -40,7 +40,7 @@ func (b *Backend) TraceTransaction(hash common.Hash, config *evmtypes.TraceConfi
 
 	// check tx index is not out of bound
 	if len(blk.Block.Txs) > math.MaxUint32 {
-		return nil, fmt.Errorf("tx count %d is overfloing", len(blk.Block.Txs))
+		return nil, fmt.Errorf("tx count %d is overflowing", len(blk.Block.Txs))
 	}
 	txsLen := uint32(len(blk.Block.Txs)) // #nosec G115 -- checked for int overflow already
 	if txsLen < transaction.TxIndex {
@@ -61,7 +61,7 @@ func (b *Backend) TraceTransaction(hash common.Hash, config *evmtypes.TraceConfi
 
 		if txAdditional != nil {
 			// Handle synthetic EVM transaction
-			ethMsg := b.parseDerivedTxFromAdditionalFieldsForTrace(txAdditional)
+			ethMsg := b.parseDerivedTxFromAdditionalFields(txAdditional)
 			if ethMsg != nil {
 				predecessors = append(predecessors, ethMsg)
 			}
@@ -109,7 +109,7 @@ func (b *Backend) TraceTransaction(hash common.Hash, config *evmtypes.TraceConfi
 		}
 
 		if txAdditional != nil {
-			ethMsg := b.parseDerivedTxFromAdditionalFieldsForTrace(txAdditional)
+			ethMsg := b.parseDerivedTxFromAdditionalFields(txAdditional)
 			if ethMsg != nil {
 				predecessors = append(predecessors, ethMsg)
 			}
@@ -125,7 +125,7 @@ func (b *Backend) TraceTransaction(hash common.Hash, config *evmtypes.TraceConfi
 			return nil, fmt.Errorf("invalid transaction type %T", tx.GetMsgs()[transaction.MsgIndex])
 		}
 	} else {
-		ethMessage = b.parseDerivedTxFromAdditionalFieldsForTrace(additional)
+		ethMessage = b.parseDerivedTxFromAdditionalFields(additional)
 		if ethMessage == nil {
 			b.logger.Error("failed to get derived eth msg from additional fields")
 			return nil, fmt.Errorf("failed to get derived eth msg from additional fields")

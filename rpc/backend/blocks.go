@@ -316,31 +316,6 @@ func (b *Backend) parseDerivedTxFromAdditionalFields(
 	additional *rpctypes.TxResultAdditionalFields,
 ) *evmtypes.MsgEthereumTx {
 	recipient := additional.Recipient
-	t := ethtypes.NewTx(&ethtypes.LegacyTx{
-		Nonce:    additional.Nonce,
-		Data:     additional.Data,
-		Gas:      additional.GasUsed,
-		To:       &recipient,
-		GasPrice: nil,
-		Value:    additional.Value,
-		V:        big.NewInt(0),
-		R:        big.NewInt(0),
-		S:        big.NewInt(0),
-	})
-	ethMsg := &evmtypes.MsgEthereumTx{}
-	err := ethMsg.FromEthereumTx(t)
-	if err != nil {
-		b.logger.Error("can not create eth msg", err.Error())
-		return nil
-	}
-	ethMsg.Hash = additional.Hash.Hex()
-	ethMsg.From = additional.Sender.Hex()
-	return ethMsg
-}
-func (b *Backend) parseDerivedTxFromAdditionalFieldsForTrace(
-	additional *rpctypes.TxResultAdditionalFields,
-) *evmtypes.MsgEthereumTx {
-	recipient := additional.Recipient
 
 	// for transactions before v31 this value was mistakenly used for Gas field
 	gas := additional.GasUsed
