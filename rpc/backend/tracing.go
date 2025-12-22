@@ -50,7 +50,7 @@ func (b *Backend) TraceTransaction(hash common.Hash, config *evmtypes.TraceConfi
 
 	var predecessors []*evmtypes.MsgEthereumTx
 	for i := 0; i < int(transaction.TxIndex); i++ {
-		_, txAdditional, err := b.GetTxByTxIndex(blk.Block.Height, uint(i))
+		transaction, txAdditional, err := b.GetTxByTxIndex(blk.Block.Height, uint(i))
 		if err != nil {
 			b.logger.Debug("failed to get tx by index",
 				"height", blk.Block.Height,
@@ -78,9 +78,26 @@ func (b *Backend) TraceTransaction(hash common.Hash, config *evmtypes.TraceConfi
 			continue
 		}
 
-		for _, msg := range tx.GetMsgs() {
+		index := int(transaction.MsgIndex)
+		for j := 0; j < index; j++ {
+			msg := tx.GetMsgs()[j]
+			// Check if it’s a normal Ethereum tx
 			if ethMsg, ok := msg.(*evmtypes.MsgEthereumTx); ok {
 				predecessors = append(predecessors, ethMsg)
+				continue
+			}
+			// Fetch additional data for predecessors
+			_, txAdditionalMsg, err := b.GetTxByEthHashAndMsgIndex(hash, j)
+			if err != nil {
+				b.logger.Debug("failed to get tx additional info", "error", err.Error())
+				continue
+			}
+
+			if txAdditionalMsg != nil {
+				ethMsg := b.parseDerivedTxFromAdditionalFields(txAdditionalMsg)
+				if ethMsg != nil {
+					predecessors = append(predecessors, ethMsg)
+				}
 			}
 		}
 	}
