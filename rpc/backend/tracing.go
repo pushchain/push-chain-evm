@@ -110,28 +110,54 @@ func (b *Backend) TraceTransaction(hash common.Hash, config *evmtypes.TraceConfi
 
 	// add predecessor messages in current cosmos tx
 	index := int(transaction.MsgIndex) // #nosec G115
-
 	for i := 0; i < index; i++ {
 		msg := tx.GetMsgs()[i]
-		// Check if it’s a normal Ethereum tx
+		// Check if it's a normal Ethereum tx
 		if ethMsg, ok := msg.(*evmtypes.MsgEthereumTx); ok {
 			predecessors = append(predecessors, ethMsg)
 			continue
 		}
-		// Fetch additional data for predecessors
-		_, txAdditional, err := b.GetTxByEthHashAndMsgIndex(hash, i)
-		if err != nil {
-			b.logger.Debug("failed to get tx additional info", "error", err.Error())
-			continue
-		}
+	}
 
-		if txAdditional != nil {
-			ethMsg := b.parseDerivedTxFromAdditionalFields(txAdditional)
-			if ethMsg != nil {
-				predecessors = append(predecessors, ethMsg)
+	// For derived transactions, parse all derived txs from the current Cosmos tx's events
+	if additional != nil {
+		// This is a derived tx, fetch all derived txs from events in this Cosmos tx
+		blockRes, err := b.rpcClient.BlockResults(b.ctx, &blk.Block.Height)
+		if err == nil && int(transaction.TxIndex) < len(blockRes.TxsResults) {
+			txResult := blockRes.TxsResults[transaction.TxIndex]
+			parsedTxs, err := rpctypes.ParseTxResult(txResult, tx)
+			if err == nil {
+				// Add all derived txs that come before the current one as predecessors
+				for _, parsedTx := range parsedTxs.Txs {
+					// Stop when we reach the current transaction
+					if parsedTx.Hash == additional.Hash {
+						break
+					}
+					// Only include derived txs
+					if parsedTx.Type == evmtypes.DerivedTxType {
+						ethMsg := b.parseDerivedTxFromAdditionalFields(&rpctypes.TxResultAdditionalFields{
+							Value:     parsedTx.Amount,
+							Hash:      parsedTx.Hash,
+							TxHash:    parsedTx.TxHash,
+							Type:      parsedTx.Type,
+							Recipient: parsedTx.Recipient,
+							Sender:    parsedTx.Sender,
+							GasUsed:   parsedTx.GasUsed,
+							Data:      parsedTx.Data,
+							Nonce:     parsedTx.Nonce,
+							GasLimit:  &parsedTx.GasLimit,
+						})
+						if ethMsg != nil {
+							predecessors = append(predecessors, ethMsg)
+						}
+					}
+				}
 			}
 		}
 	}
+
+	fmt.Println("[Trace Debug miku ] : Predecessors : ", predecessors)
+
 	var ethMessage *evmtypes.MsgEthereumTx
 	var ok bool
 
