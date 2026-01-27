@@ -116,19 +116,6 @@ func (b *Backend) TraceTransaction(hash common.Hash, config *evmtypes.TraceConfi
 				predecessors = append(predecessors, ethMsg)
 				continue
 			}
-			// Fetch additional data for predecessors
-			_, txAdditionalMsg, err := b.GetTxByEthHashAndMsgIndex(hash, j)
-			if err != nil {
-				b.logger.Debug("failed to get tx additional info", "error", err.Error())
-				continue
-			}
-
-			if txAdditionalMsg != nil {
-				ethMsg := b.parseDerivedTxFromAdditionalFields(txAdditionalMsg)
-				if ethMsg != nil {
-					predecessors = append(predecessors, ethMsg)
-				}
-			}
 		}
 	}
 
@@ -185,8 +172,6 @@ func (b *Backend) TraceTransaction(hash common.Hash, config *evmtypes.TraceConfi
 			}
 		}
 	}
-
-	fmt.Println("[Trace Debug miku ] : Predecessors : ", predecessors)
 
 	var ethMessage *evmtypes.MsgEthereumTx
 	var ok bool
