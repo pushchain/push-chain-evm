@@ -50,7 +50,7 @@ func (b *Backend) TraceTransaction(hash common.Hash, config *evmtypes.TraceConfi
 
 	var predecessors []*evmtypes.MsgEthereumTx
 	for i := 0; i < int(transaction.TxIndex); i++ {
-		transaction, txAdditional, err := b.GetTxByTxIndex(blk.Block.Height, uint(i))
+		predecessorTx, txAdditional, err := b.GetTxByTxIndex(blk.Block.Height, uint(i))
 		if err != nil {
 			b.logger.Debug("failed to get tx by index",
 				"height", blk.Block.Height,
@@ -60,10 +60,40 @@ func (b *Backend) TraceTransaction(hash common.Hash, config *evmtypes.TraceConfi
 		}
 
 		if txAdditional != nil {
-			// Handle synthetic EVM transaction
-			ethMsg := b.parseDerivedTxFromAdditionalFields(txAdditional)
-			if ethMsg != nil {
-				predecessors = append(predecessors, ethMsg)
+			// This is a derived tx, fetch all derived txs from events in this Cosmos tx
+			blockRes, err := b.rpcClient.BlockResults(b.ctx, &blk.Block.Height)
+			if err == nil && i < len(blockRes.TxsResults) {
+				txResult := blockRes.TxsResults[i]
+				cosmosTx, err := b.clientCtx.TxConfig.TxDecoder()(blk.Block.Txs[i])
+				if err == nil {
+					parsedTxs, err := rpctypes.ParseTxResult(txResult, cosmosTx)
+					if err == nil {
+						for _, parsedTx := range parsedTxs.Txs {
+							// Stop when we reach the current transaction
+							if parsedTx.Hash == txAdditional.Hash {
+								break
+							}
+							// Only include derived txs
+							if parsedTx.Type == evmtypes.DerivedTxType {
+								ethMsg := b.parseDerivedTxFromAdditionalFields(&rpctypes.TxResultAdditionalFields{
+									Value:     parsedTx.Amount,
+									Hash:      parsedTx.Hash,
+									TxHash:    parsedTx.TxHash,
+									Type:      parsedTx.Type,
+									Recipient: parsedTx.Recipient,
+									Sender:    parsedTx.Sender,
+									GasUsed:   parsedTx.GasUsed,
+									Data:      parsedTx.Data,
+									Nonce:     parsedTx.Nonce,
+									GasLimit:  &parsedTx.GasLimit,
+								})
+								if ethMsg != nil {
+									predecessors = append(predecessors, ethMsg)
+								}
+							}
+						}
+					}
+				}
 			}
 			continue
 		}
@@ -78,7 +108,7 @@ func (b *Backend) TraceTransaction(hash common.Hash, config *evmtypes.TraceConfi
 			continue
 		}
 
-		index := int(transaction.MsgIndex)
+		index := int(predecessorTx.MsgIndex)
 		for j := 0; j < index; j++ {
 			msg := tx.GetMsgs()[j]
 			// Check if it’s a normal Ethereum tx
