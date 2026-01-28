@@ -317,9 +317,12 @@ func (b *Backend) parseDerivedTxFromAdditionalFields(
 ) *evmtypes.MsgEthereumTx {
 	recipient := additional.Recipient
 
-	// for transactions before v31 this value was mistakenly used for Gas field
+	// Use GasLimit when available and non-zero, otherwise fall back to GasUsed.
+	// Note: For transactions before v31, GasLimit event was not emitted, so it will be 0.
+	// Using GasUsed as fallback is not ideal for tracing as it may cause "intrinsic gas too low"
+	// or REVERT errors since GasUsed < GasLimit.
 	gas := additional.GasUsed
-	if additional.GasLimit != nil {
+	if additional.GasLimit != nil && *additional.GasLimit > 0 {
 		gas = *additional.GasLimit
 	}
 	t := ethtypes.NewTx(&ethtypes.LegacyTx{
