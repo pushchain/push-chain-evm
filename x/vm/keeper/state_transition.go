@@ -260,9 +260,12 @@ func (k *Keeper) ApplyTransaction(ctx sdk.Context, tx *ethtypes.Transaction) (*t
 			k.Logger(ctx).Error("failed to convert evm denom for base fee burn", "err", err)
 		} else {
 			burnCoins := sdk.Coins{converted}
-			if err := k.bankWrapper.BurnCoins(ctx, authtypes.FeeCollectorName, burnCoins); err != nil {
+			evmmodAddr := authtypes.NewModuleAddress(types.ModuleName)
+			if err := k.bankWrapper.SendCoinsFromModuleToAccount(ctx, authtypes.FeeCollectorName, evmmodAddr, burnCoins); err != nil {
+				k.Logger(ctx).Error("failed to move base fee to evm module account", "err", err)
+			} else if err := k.bankWrapper.BurnCoins(ctx, types.ModuleName, burnCoins); err != nil {
 				// handle error - either log or return error. Logging avoids failing block.
-				k.Logger(ctx).Error("failed to burn base fee from fee collector", "err", err)
+				k.Logger(ctx).Error("failed to burn base fee from evm module account", "err", err)
 			}
 		}
 	}
