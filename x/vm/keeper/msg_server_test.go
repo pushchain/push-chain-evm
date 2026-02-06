@@ -13,6 +13,7 @@ import (
 
 func (suite *KeeperTestSuite) TestEthereumTx() {
 	suite.enableFeemarket = true
+	suite.mintFeeCollector = true
 	defer func() { suite.enableFeemarket = false }()
 	suite.SetupTest()
 	testCases := []struct {
@@ -77,6 +78,7 @@ func (suite *KeeperTestSuite) TestEthereumTx() {
 		})
 	}
 	suite.enableFeemarket = false
+	suite.mintFeeCollector = false
 }
 
 func (suite *KeeperTestSuite) TestUpdateParams() {
