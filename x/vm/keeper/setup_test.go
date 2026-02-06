@@ -4,9 +4,9 @@ import (
 	"math"
 	"testing"
 
-	"github.com/ethereum/go-ethereum/params"
 	"github.com/stretchr/testify/suite"
 
+	testconstants "github.com/cosmos/evm/testutil/constants"
 	"github.com/cosmos/evm/testutil/integration/os/factory"
 	"github.com/cosmos/evm/testutil/integration/os/grpc"
 	"github.com/cosmos/evm/testutil/integration/os/keyring"
@@ -44,6 +44,7 @@ func TestKeeperTestSuite(t *testing.T) {
 	s = new(KeeperTestSuite)
 	s.enableFeemarket = false
 	s.enableLondonHF = true
+	s.mintFeeCollector = true
 	suite.Run(t, s)
 
 	// Run UnitTestSuite
@@ -56,7 +57,7 @@ func (suite *KeeperTestSuite) SetupTest() {
 	// Set custom balance based on test params
 	customGenesis := network.CustomGenesisState{}
 	feemarketGenesis := feemarkettypes.DefaultGenesisState()
-	if s.enableFeemarket {
+	if suite.enableFeemarket {
 		feemarketGenesis.Params.EnableHeight = 1
 		feemarketGenesis.Params.NoBaseFee = false
 	} else {
@@ -64,9 +65,10 @@ func (suite *KeeperTestSuite) SetupTest() {
 	}
 	customGenesis[feemarkettypes.ModuleName] = feemarketGenesis
 
-	if s.mintFeeCollector {
+	if suite.mintFeeCollector {
 		// mint some coin to fee collector
-		coins := sdk.NewCoins(sdk.NewCoin(evmtypes.GetEVMCoinDenom(), sdkmath.NewInt(int64(params.TxGas)-1)))
+		mintAmt := sdkmath.NewInt(1_000_000_000_000_000_000)
+		coins := sdk.NewCoins(sdk.NewCoin(testconstants.ExampleAttoDenom, mintAmt))
 		balances := []banktypes.Balance{
 			{
 				Address: authtypes.NewModuleAddress(authtypes.FeeCollectorName).String(),
@@ -91,7 +93,7 @@ func (suite *KeeperTestSuite) SetupTest() {
 	s.keyring = keys
 
 	chainConfig := evmtypes.DefaultChainConfig(suite.network.GetChainID())
-	if !s.enableLondonHF {
+	if !suite.enableLondonHF {
 		maxInt := sdkmath.NewInt(math.MaxInt64)
 		chainConfig.LondonBlock = &maxInt
 		chainConfig.ArrowGlacierBlock = &maxInt
