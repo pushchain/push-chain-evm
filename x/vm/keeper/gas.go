@@ -37,7 +37,7 @@ func (k *Keeper) RefundGas(ctx sdk.Context, msg core.Message, leftoverGas uint64
 
 	// refundable amount for base fee: baseFee * gasUsed
 	baseFeeRefund := big.NewInt(0)
-	if baseFee != nil && baseFee.Sign() > 0 && gasUsed > 0 {
+	if msg.GasPrice().Sign() > 0 && baseFee != nil && baseFee.Sign() > 0 && gasUsed > 0 {
 		baseFeeRefund = new(big.Int).Mul(baseFee, new(big.Int).SetUint64(gasUsed))
 	}
 
