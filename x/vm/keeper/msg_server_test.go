@@ -3,6 +3,7 @@ package keeper_test
 import (
 	"math/big"
 
+	sdkmath "cosmossdk.io/math"
 	"github.com/cosmos/evm/testutil/integration/os/utils"
 	"github.com/cosmos/evm/x/vm/types"
 
@@ -14,7 +15,10 @@ import (
 func (suite *KeeperTestSuite) TestEthereumTx() {
 	suite.enableFeemarket = true
 	suite.mintFeeCollector = true
-	defer func() { suite.enableFeemarket = false }()
+	defer func() {
+		suite.enableFeemarket = false
+		suite.mintFeeCollector = false
+	}()
 	suite.SetupTest()
 	testCases := []struct {
 		name        string
@@ -53,6 +57,24 @@ func (suite *KeeperTestSuite) TestEthereumTx() {
 	for _, tc := range testCases {
 		suite.Run(tc.name, func() {
 			msg := tc.getMsg()
+
+			// Reset fee collector balance before each subtest if needed
+			if suite.mintFeeCollector {
+				feeCollectorAddr := authtypes.NewModuleAddress(authtypes.FeeCollectorName)
+				denom := types.GetEVMCoinExtendedDenom()
+				currentBalance := suite.network.App.BankKeeper.GetBalance(suite.network.GetContext(), feeCollectorAddr, denom)
+				requiredBalance := sdkmath.NewInt(100000000000000000)
+				if currentBalance.Amount.LT(requiredBalance) {
+					// Mint additional coins to fee collector
+					coinsToAdd := sdktypes.NewCoins(sdktypes.NewCoin(denom, requiredBalance.Sub(currentBalance.Amount)))
+					err := suite.network.App.BankKeeper.MintCoins(suite.network.GetContext(), types.ModuleName, coinsToAdd)
+					suite.Require().NoError(err)
+					err = suite.network.App.BankKeeper.SendCoinsFromModuleToModule(suite.network.GetContext(), types.ModuleName, authtypes.FeeCollectorName, coinsToAdd)
+					suite.Require().NoError(err)
+				}
+				balance := suite.network.App.BankKeeper.GetBalance(suite.network.GetContext(), feeCollectorAddr, denom)
+				suite.T().Logf("[%s] Fee collector balance before tx: %s", tc.name, balance)
+			}
 
 			// Function to be tested
 			res, err := suite.network.App.EVMKeeper.EthereumTx(suite.network.GetContext(), msg)

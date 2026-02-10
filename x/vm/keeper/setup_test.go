@@ -15,7 +15,6 @@ import (
 
 	sdkmath "cosmossdk.io/math"
 
-	codectypes "github.com/cosmos/cosmos-sdk/codec/types"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	authtypes "github.com/cosmos/cosmos-sdk/x/auth/types"
 	banktypes "github.com/cosmos/cosmos-sdk/x/bank/types"
@@ -56,7 +55,7 @@ func (suite *KeeperTestSuite) SetupTest() {
 	// Set custom balance based on test params
 	customGenesis := network.CustomGenesisState{}
 	feemarketGenesis := feemarkettypes.DefaultGenesisState()
-	if s.enableFeemarket {
+	if suite.enableFeemarket {
 		feemarketGenesis.Params.EnableHeight = 1
 		feemarketGenesis.Params.NoBaseFee = false
 	} else {
@@ -64,9 +63,13 @@ func (suite *KeeperTestSuite) SetupTest() {
 	}
 	customGenesis[feemarkettypes.ModuleName] = feemarketGenesis
 
-	if s.mintFeeCollector {
+	suite.T().Logf("mintFeeCollector=%v, enableFeemarket=%v", suite.mintFeeCollector, suite.enableFeemarket)
+	if suite.mintFeeCollector {
+		suite.T().Log("Setting up fee collector with funds")
 		// mint some coin to fee collector (need enough for gas refunds)
-		coins := sdk.NewCoins(sdk.NewCoin(evmtypes.GetEVMCoinExtendedDenom(), sdkmath.NewInt(22000000000000)))
+		denom := evmtypes.GetEVMCoinExtendedDenom()
+		suite.T().Logf("Using denom: %s", denom)
+		coins := sdk.NewCoins(sdk.NewCoin(denom, sdkmath.NewInt(100000000000000000)))
 		balances := []banktypes.Balance{
 			{
 				Address: authtypes.NewModuleAddress(authtypes.FeeCollectorName).String(),
@@ -75,18 +78,7 @@ func (suite *KeeperTestSuite) SetupTest() {
 		}
 		bankGenesis := banktypes.DefaultGenesisState()
 		bankGenesis.Balances = balances
-		// Note: Supply will be automatically added by setBankGenesisState in network setup
 		customGenesis[banktypes.ModuleName] = bankGenesis
-
-		moduleAcc := authtypes.NewEmptyModuleAccount(authtypes.FeeCollectorName)
-		anyAcc, err := codectypes.NewAnyWithValue(moduleAcc)
-		if err != nil {
-			panic(err)
-		}
-
-		authGenesis := authtypes.DefaultGenesisState()
-		authGenesis.Accounts = append(authGenesis.Accounts, anyAcc)
-		customGenesis[authtypes.ModuleName] = authGenesis
 	}
 
 	nw := network.NewUnitTestNetwork(
@@ -96,13 +88,20 @@ func (suite *KeeperTestSuite) SetupTest() {
 	gh := grpc.NewIntegrationHandler(nw)
 	tf := factory.New(nw, gh)
 
-	s.network = nw
-	s.factory = tf
-	s.handler = gh
-	s.keyring = keys
+	// Verify fee collector balance after network creation
+	if suite.mintFeeCollector {
+		feeCollectorAddr := authtypes.NewModuleAddress(authtypes.FeeCollectorName)
+		balance := nw.App.BankKeeper.GetBalance(nw.GetContext(), feeCollectorAddr, evmtypes.GetEVMCoinExtendedDenom())
+		suite.T().Logf("Fee collector balance after network creation: %s", balance)
+	}
+
+	suite.network = nw
+	suite.factory = tf
+	suite.handler = gh
+	suite.keyring = keys
 
 	chainConfig := evmtypes.DefaultChainConfig(suite.network.GetChainID())
-	if !s.enableLondonHF {
+	if !suite.enableLondonHF {
 		maxInt := sdkmath.NewInt(math.MaxInt64)
 		chainConfig.LondonBlock = &maxInt
 		chainConfig.ArrowGlacierBlock = &maxInt
