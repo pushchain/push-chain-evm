@@ -63,13 +63,9 @@ func (suite *KeeperTestSuite) SetupTest() {
 	}
 	customGenesis[feemarkettypes.ModuleName] = feemarketGenesis
 
-	suite.T().Logf("mintFeeCollector=%v, enableFeemarket=%v", suite.mintFeeCollector, suite.enableFeemarket)
 	if suite.mintFeeCollector {
-		suite.T().Log("Setting up fee collector with funds")
-		// mint some coin to fee collector (need enough for gas refunds)
-		denom := evmtypes.GetEVMCoinExtendedDenom()
-		suite.T().Logf("Using denom: %s", denom)
-		coins := sdk.NewCoins(sdk.NewCoin(denom, sdkmath.NewInt(100000000000000000)))
+		// Mint coins to fee collector for gas refunds
+		coins := sdk.NewCoins(sdk.NewCoin(evmtypes.GetEVMCoinExtendedDenom(), sdkmath.NewInt(100000000000000000)))
 		balances := []banktypes.Balance{
 			{
 				Address: authtypes.NewModuleAddress(authtypes.FeeCollectorName).String(),
@@ -87,13 +83,6 @@ func (suite *KeeperTestSuite) SetupTest() {
 	)
 	gh := grpc.NewIntegrationHandler(nw)
 	tf := factory.New(nw, gh)
-
-	// Verify fee collector balance after network creation
-	if suite.mintFeeCollector {
-		feeCollectorAddr := authtypes.NewModuleAddress(authtypes.FeeCollectorName)
-		balance := nw.App.BankKeeper.GetBalance(nw.GetContext(), feeCollectorAddr, evmtypes.GetEVMCoinExtendedDenom())
-		suite.T().Logf("Fee collector balance after network creation: %s", balance)
-	}
 
 	suite.network = nw
 	suite.factory = tf
