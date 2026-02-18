@@ -4,6 +4,7 @@ import (
 	"math"
 	"testing"
 
+	ethparams "github.com/ethereum/go-ethereum/params"
 	"github.com/stretchr/testify/suite"
 
 	"github.com/cosmos/evm/testutil/integration/os/factory"
@@ -65,7 +66,12 @@ func (suite *KeeperTestSuite) SetupTest() {
 
 	if suite.mintFeeCollector {
 		// Mint coins to fee collector for gas refunds
-		coins := sdk.NewCoins(sdk.NewCoin(evmtypes.GetEVMCoinExtendedDenom(), sdkmath.NewInt(100000000000000000)))
+		baseFee := feemarketGenesis.Params.BaseFee.TruncateInt()
+		gasUsed := sdkmath.NewIntFromUint64(ethparams.TxGas)
+		refundBuffer := sdkmath.NewIntFromUint64(ethparams.TxGas - 1)
+		requiredBalance := gasUsed.Mul(baseFee).Add(refundBuffer)
+
+		coins := sdk.NewCoins(sdk.NewCoin(evmtypes.GetEVMCoinExtendedDenom(), requiredBalance))
 		balances := []banktypes.Balance{
 			{
 				Address: authtypes.NewModuleAddress(authtypes.FeeCollectorName).String(),

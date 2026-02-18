@@ -3,6 +3,8 @@ package keeper_test
 import (
 	"math/big"
 
+	ethparams "github.com/ethereum/go-ethereum/params"
+
 	sdkmath "cosmossdk.io/math"
 	"github.com/cosmos/evm/testutil/integration/os/utils"
 	"github.com/cosmos/evm/x/vm/types"
@@ -63,7 +65,16 @@ func (suite *KeeperTestSuite) TestEthereumTx() {
 				feeCollectorAddr := authtypes.NewModuleAddress(authtypes.FeeCollectorName)
 				denom := types.GetEVMCoinExtendedDenom()
 				currentBalance := suite.network.App.BankKeeper.GetBalance(suite.network.GetContext(), feeCollectorAddr, denom)
-				requiredBalance := sdkmath.NewInt(100000000000000000)
+
+				baseFee := suite.network.App.EVMKeeper.GetBaseFee(suite.network.GetContext())
+				if baseFee == nil {
+					baseFee = big.NewInt(0)
+				}
+
+				gasLimit := new(big.Int).SetUint64(msg.GetGas())
+				requiredBalance := sdkmath.NewIntFromBigInt(new(big.Int).Mul(gasLimit, baseFee)).
+					Add(sdkmath.NewIntFromUint64(ethparams.TxGas - 1))
+
 				if currentBalance.Amount.LT(requiredBalance) {
 					coinsToAdd := sdktypes.NewCoins(sdktypes.NewCoin(denom, requiredBalance.Sub(currentBalance.Amount)))
 					err := suite.network.App.BankKeeper.MintCoins(suite.network.GetContext(), types.ModuleName, coinsToAdd)
