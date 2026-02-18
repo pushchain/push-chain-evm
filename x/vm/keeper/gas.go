@@ -25,8 +25,11 @@ func (k *Keeper) GetEthIntrinsicGas(ctx sdk.Context, msg core.Message, cfg *para
 	return core.IntrinsicGas(msg.Data(), msg.AccessList(), isContractCreation, homestead, istanbul)
 }
 
-// RefundGas transfers the refundable gas amount to the sender and then burns baseFee * gasUsed
-// from the sender account.
+// RefundGas transfers the leftover gas and baseFee amount to the sender of the message, capped to half of the total gas
+// consumed in the transaction. Additionally, the function sets the total gas consumed to the value
+// returned by the EVM execution, thus ignoring the previous intrinsic gas consumed during in the
+// AnteHandler.
+// and then burns baseFee amount from the sender account.
 func (k *Keeper) RefundGas(ctx sdk.Context, msg core.Message, leftoverGas uint64, gasUsed uint64, baseFee *big.Int, denom string) error {
 	if msg.GasPrice().Sign() < 0 {
 		return errorsmod.Wrapf(types.ErrInvalidRefund, "gas price cannot be negative %d", msg.GasPrice().Int64())
