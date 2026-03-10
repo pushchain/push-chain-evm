@@ -183,6 +183,19 @@ func (k Keeper) DerivedEVMCallWithData(
 
 	gasCap := config.DefaultGasCap
 	if commit && gasLimit == nil {
+		estimateStartGas := ctx.GasMeter().GasConsumed()
+		k.Logger(ctx).Info(
+			"[evm] derived evm call using internal gas estimation",
+			"from", from.Hex(),
+			"contract", func() string {
+				if contract == nil {
+					return ""
+				}
+				return contract.Hex()
+			}(),
+			"sdk_gas_before_estimate", estimateStartGas,
+		)
+
 		args, err := json.Marshal(types.TransactionArgs{
 			From: &from,
 			To:   contract,
@@ -200,10 +213,24 @@ func (k Keeper) DerivedEVMCallWithData(
 			return nil, err
 		}
 		gasCap = gasRes.Gas
+		k.Logger(ctx).Info(
+			"[evm] derived evm call internal gas estimation complete",
+			"estimated_gas", gasCap,
+			"sdk_gas_delta_estimate", ctx.GasMeter().GasConsumed()-estimateStartGas,
+		)
 	}
 	if gasLimit != nil {
 		gasCap = gasLimit.Uint64()
 	}
+
+	k.Logger(ctx).Info(
+		"[evm] derived evm call execution config",
+		"gas_cap", gasCap,
+		"has_explicit_gas_limit", gasLimit != nil,
+		"commit", commit,
+		"gasless", gasless,
+		"is_module_sender", isModuleSender,
+	)
 
 	msg := ethtypes.NewMessage(
 		from,
@@ -244,6 +271,12 @@ func (k Keeper) DerivedEVMCallWithData(
 	if err != nil {
 		return nil, err
 	}
+	k.Logger(ctx).Info(
+		"[evm] derived evm call execution result",
+		"evm_gas_used", res.GasUsed,
+		"failed", res.Failed(),
+		"vm_error", res.VmError,
+	)
 
 	if !res.Failed() {
 		commitState()

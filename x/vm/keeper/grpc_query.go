@@ -286,9 +286,11 @@ func (k Keeper) EstimateGasInternal(c context.Context, req *types.EthCallRequest
 
 	// Binary search the gas requirement, as it may be higher than the amount used
 	var (
-		lo     = ethparams.TxGas - 1
-		hi     uint64
-		gasCap uint64
+		lo                 = ethparams.TxGas - 1
+		hi                 uint64
+		gasCap             uint64
+		estimationStartGas = ctx.GasMeter().GasConsumed()
+		executableCalls    uint64
 	)
 
 	// Determine the highest gas limit can be used during the estimation.
@@ -310,6 +312,13 @@ func (k Keeper) EstimateGasInternal(c context.Context, req *types.EthCallRequest
 	}
 
 	gasCap = hi
+	k.Logger(ctx).Info(
+		"[evm] estimate gas start",
+		"from_type", int32(fromType),
+		"lo", lo,
+		"hi", hi,
+		"gas_cap", req.GasCap,
+	)
 	cfg, err := k.EVMConfig(ctx, GetProposerAddress(ctx, req.ProposerAddress))
 	if err != nil {
 		return nil, status.Error(codes.Internal, "failed to load evm config")
@@ -360,6 +369,7 @@ func (k Keeper) EstimateGasInternal(c context.Context, req *types.EthCallRequest
 
 	// Create a helper to check if a gas allowance results in an executable transaction
 	executable := func(gas uint64) (vmError bool, rsp *types.MsgEthereumTxResponse, err error) {
+		executableCalls++
 		// update the message with the new gas value
 		msg = ethtypes.NewMessage(
 			msg.From(),
@@ -413,6 +423,14 @@ func (k Keeper) EstimateGasInternal(c context.Context, req *types.EthCallRequest
 	if err != nil {
 		return nil, err
 	}
+	k.Logger(ctx).Info(
+		"[evm] estimate gas binary search complete",
+		"from_type", int32(fromType),
+		"estimated_hi", hi,
+		"original_hi", gasCap,
+		"executable_calls", executableCalls,
+		"sdk_gas_delta", ctx.GasMeter().GasConsumed()-estimationStartGas,
+	)
 
 	// Reject the transaction as invalid if it still fails at the highest allowance
 	if hi == gasCap {
@@ -435,6 +453,13 @@ func (k Keeper) EstimateGasInternal(c context.Context, req *types.EthCallRequest
 			return nil, fmt.Errorf("gas required exceeds allowance (%d)", gasCap)
 		}
 	}
+	k.Logger(ctx).Info(
+		"[evm] estimate gas done",
+		"from_type", int32(fromType),
+		"estimated_gas", hi,
+		"executable_calls", executableCalls,
+		"sdk_gas_delta", ctx.GasMeter().GasConsumed()-estimationStartGas,
+	)
 	return &types.EstimateGasResponse{Gas: hi}, nil
 }
 
