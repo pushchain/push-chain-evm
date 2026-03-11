@@ -2,7 +2,6 @@ package common
 
 import (
 	"errors"
-	"fmt"
 	"math/big"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
@@ -148,8 +147,7 @@ func (p Precompile) RunSetup(
 		}
 	}
 
-	initialGas := ctx.GasMeter().GasConsumed()
-	fmt.Println("[checking...]: ", initialGas)
+	initialGas := storetypes.Gas(0)
 
 	defer HandleGasError(ctx, contract, initialGas, &err, stateDB, s)()
 
