@@ -147,7 +147,7 @@ func (p Precompile) RunSetup(
 		}
 	}
 
-	initialGas := storetypes.Gas(0)
+	initialGas := ctx.GasMeter().GasConsumed()
 
 	defer HandleGasError(ctx, contract, initialGas, &err, stateDB, s)()
 
