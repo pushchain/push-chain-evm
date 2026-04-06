@@ -1,6 +1,7 @@
 package types
 
 import (
+	"io"
 	"math/big"
 	"os"
 	"time"
@@ -32,7 +33,7 @@ func NewTracer(tracer string, msg core.Message, cfg *params.ChainConfig, height 
 		preCompiles := vm.DefaultActivePrecompiles(cfg.Rules(big.NewInt(height), cfg.MergeNetsplitBlock != nil))
 		return logger.NewAccessListTracer(msg.AccessList(), msg.From(), *msg.To(), preCompiles)
 	case TracerJSON:
-		return logger.NewJSONLogger(logCfg, os.Stderr)
+		return logger.NewJSONLogger(logCfg, io.Discard)
 	case TracerMarkdown:
 		return logger.NewMarkdownLogger(logCfg, os.Stdout) // TODO: Stderr ?
 	case TracerStruct:
