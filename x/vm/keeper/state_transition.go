@@ -259,8 +259,12 @@ func (k *Keeper) ApplyTransaction(ctx sdk.Context, tx *ethtypes.Transaction) (*t
 	bloom, _ := k.initializeBloomFromLogs(ctx, ethLogs)
 
 	// refund gas in order to match the Ethereum gas consumption instead of the default SDK one.
-	if err = k.RefundGas(ctx, msg, msg.Gas()-res.GasUsed, res.GasUsed, cfg.BaseFee, evmDenom); err != nil {
-		return nil, errorsmod.Wrapf(err, "failed to refund gas leftover gas to sender %s", msg.From())
+	remainingGas := uint64(0)
+	if msg.GasLimit > res.GasUsed {
+		remainingGas = msg.GasLimit - res.GasUsed
+	}
+	if err = k.RefundGas(ctx, *msg, remainingGas, types.GetEVMCoinDenom()); err != nil {
+		return nil, errorsmod.Wrapf(err, "failed to refund gas leftover gas to sender %s", msg.From)
 	}
 
 	if len(ethLogs) > 0 {

@@ -10,7 +10,6 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
-	"github.com/ethereum/go-ethereum/common/math"
 	"github.com/ethereum/go-ethereum/core"
 	ethtypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
@@ -25,6 +24,7 @@ import (
 	tmproto "github.com/cometbft/cometbft/proto/tendermint/types"
 
 	cosmosevmtypes "github.com/cosmos/evm/types"
+	evmante "github.com/cosmos/evm/x/vm/ante"
 	"github.com/cosmos/evm/x/vm/statedb"
 	"github.com/cosmos/evm/x/vm/types"
 
@@ -498,10 +498,10 @@ func (k Keeper) TraceTx(c context.Context, req *types.QueryTraceTxRequest) (*typ
 	for i, tx := range req.Predecessors {
 		ethTx := tx.AsTransaction()
 
-		var msg ethtypes.Message
+		var msg *core.Message
 		// if tx is not unsigned, from field should be derived from signer, which can be done using AsMessage function
 		if !isUnsigned(ethTx) {
-			msg, err = ethTx.AsMessage(signer, cfg.BaseFee)
+			msg, err = core.TransactionToMessage(ethTx, signer, cfg.BaseFee)
 			if err != nil {
 				continue
 			}
@@ -629,19 +629,19 @@ func (k *Keeper) traceTx(
 	tx *ethtypes.Transaction,
 	traceConfig *types.TraceConfig,
 	commitMessage bool,
+	tracerConfig json.RawMessage,
 ) (*any, uint, error) {
 	// Assemble the structured logger or the JavaScript tracer
 	var (
-		tracer           *tracers.Tracer
-		overrides        *ethparams.ChainConfig
-		jsonTracerConfig json.RawMessage
-		err              error
-		timeout          = defaultTraceTimeout
+		tracer  *tracers.Tracer
+		overrides *ethparams.ChainConfig
+		err     error
+		timeout = defaultTraceTimeout
 	)
-	var msg ethtypes.Message
+	var msg *core.Message
 	// if tx is not unsigned, from field should be derived from signer, which can be done using AsMessage function
 	if !isUnsigned(tx) {
-		msg, err = tx.AsMessage(signer, cfg.BaseFee)
+		msg, err = core.TransactionToMessage(tx, signer, cfg.BaseFee)
 		if err != nil {
 			return nil, 0, status.Error(codes.Internal, err.Error())
 		}
@@ -651,11 +651,6 @@ func (k *Keeper) traceTx(
 
 	if traceConfig == nil {
 		traceConfig = &types.TraceConfig{}
-	}
-
-	if traceConfig != nil && traceConfig.TracerJsonConfig != "" {
-		// ignore error. default to no traceConfig
-		_ = json.Unmarshal([]byte(traceConfig.TracerJsonConfig), &jsonTracerConfig)
 	}
 
 	if traceConfig.Overrides != nil {
@@ -685,7 +680,7 @@ func (k *Keeper) traceTx(
 	}
 
 	if traceConfig.Tracer != "" {
-		if tracer, err = tracers.DefaultDirectory.New(traceConfig.Tracer, tCtx, jsonTracerConfig,
+		if tracer, err = tracers.DefaultDirectory.New(traceConfig.Tracer, tCtx, tracerConfig,
 			types.GetEthChainConfig()); err != nil {
 			return nil, 0, status.Error(codes.Internal, err.Error())
 		}
@@ -756,28 +751,40 @@ func (k Keeper) Config(_ context.Context, _ *types.QueryConfigRequest) (*types.Q
 	return &types.QueryConfigResponse{Config: config}, nil
 }
 
+// buildTraceCtx builds a context for simulating or tracing transactions by:
+// 1. assigning a new infinite gas meter with the provided gasLimit
+// 2. calling BuildEvmExecutionCtx to set up gas configs consistent with Ethereum transaction execution.
+func buildTraceCtx(ctx sdk.Context, gasLimit uint64) sdk.Context {
+	return evmante.BuildEvmExecutionCtx(ctx).
+		WithGasMeter(cosmosevmtypes.NewInfiniteGasMeterWithLimit(gasLimit))
+}
+
 func isUnsigned(ethTx *ethtypes.Transaction) bool {
 	r, v, s := ethTx.RawSignatureValues()
 
 	return (r == nil && v == nil && s == nil) || (r.Int64() == 0 && v.Int64() == 0 && s.Int64() == 0)
 }
-func unsignedTxAsMessage(fromAddress common.Address, tx *ethtypes.Transaction, baseFee *big.Int) ethtypes.Message {
+func unsignedTxAsMessage(fromAddress common.Address, tx *ethtypes.Transaction, baseFee *big.Int) *core.Message {
 	gasPrice := new(big.Int).Set(tx.GasPrice())
 	// If baseFee provided, set gasPrice to effectiveGasPrice.
 	if baseFee != nil {
-		gasPrice = math.BigMin(new(big.Int).Add(tx.GasTipCap(), baseFee), tx.GasFeeCap())
+		tip := new(big.Int).Add(tx.GasTipCap(), baseFee)
+		if tx.GasFeeCap().Cmp(tip) < 0 {
+			gasPrice = tx.GasFeeCap()
+		} else {
+			gasPrice = tip
+		}
 	}
-	return ethtypes.NewMessage(
-		fromAddress,
-		tx.To(),
-		tx.Nonce(),
-		tx.Value(),
-		tx.Gas(),
-		gasPrice,
-		tx.GasFeeCap(),
-		tx.GasTipCap(),
-		tx.Data(),
-		tx.AccessList(),
-		false,
-	)
+	return &core.Message{
+		From:       fromAddress,
+		To:         tx.To(),
+		Nonce:      tx.Nonce(),
+		Value:      tx.Value(),
+		GasLimit:   tx.Gas(),
+		GasPrice:   gasPrice,
+		GasFeeCap:  tx.GasFeeCap(),
+		GasTipCap:  tx.GasTipCap(),
+		Data:       tx.Data(),
+		AccessList: tx.AccessList(),
+	}
 }

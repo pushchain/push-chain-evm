@@ -635,7 +635,7 @@ func (b *Backend) GetBlockReceipts(
 		return nil, fmt.Errorf("block result not found for height %d", resBlock.Block.Height)
 	}
 
-	msgs := b.EthMsgsFromTendermintBlock(resBlock, blockRes)
+	msgs, _ := b.EthMsgsFromTendermintBlock(resBlock, blockRes)
 	result := make([]map[string]interface{}, len(msgs))
 	for i, msg := range msgs {
 		result[i], err = b.formatTxReceipt(
@@ -653,7 +653,7 @@ func (b *Backend) GetBlockReceipts(
 }
 
 func (b *Backend) formatTxReceipt(ethMsg *evmtypes.MsgEthereumTx, blockMsgs []*evmtypes.MsgEthereumTx, blockRes *tmrpctypes.ResultBlockResults, blockHeaderHash string) (map[string]interface{}, error) {
-	txResult, err := b.GetTxByEthHash(common.HexToHash(ethMsg.Hash))
+	txResult, _, err := b.GetTxByEthHash(common.HexToHash(ethMsg.Hash))
 	if err != nil {
 		return nil, fmt.Errorf("tx not found: hash=%s, error=%s", ethMsg.Hash, err.Error())
 	}

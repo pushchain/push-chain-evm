@@ -1,11 +1,13 @@
 package keeper
 
 import (
+	"encoding/json"
 	"math/big"
 	"strconv"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core"
 	ethtypes "github.com/ethereum/go-ethereum/core/types"
 
@@ -15,6 +17,7 @@ import (
 	errorsmod "cosmossdk.io/errors"
 
 	sdk "github.com/cosmos/cosmos-sdk/types"
+	errortypes "github.com/cosmos/cosmos-sdk/types/errors"
 )
 
 // CallEVM performs a smart contract method call using given args.
@@ -184,27 +187,28 @@ func (k Keeper) DerivedEVMCallWithData(
 		gasCap = gasLimit.Uint64()
 	}
 
-	msg := ethtypes.NewMessage(
-		from,
-		contract,
-		nonce,
-		value,         // amount
-		gasCap,        // gasLimit
-		big.NewInt(0), // gasFeeCap
-		big.NewInt(0), // gasTipCap
-		big.NewInt(0), // gasPrice
-		data,
-		ethtypes.AccessList{}, // AccessList
-		!commit,               // isFake
-	)
+	msg := core.Message{
+		From:             from,
+		To:               contract,
+		Nonce:            nonce,
+		Value:            value,
+		GasLimit:         gasCap,
+		GasFeeCap:        big.NewInt(0),
+		GasTipCap:        big.NewInt(0),
+		GasPrice:         big.NewInt(0),
+		Data:             data,
+		AccessList:       ethtypes.AccessList{},
+		SkipNonceChecks:  !commit,
+		SkipFromEOACheck: !commit,
+	}
 	tx := ethtypes.NewTx(&ethtypes.DynamicFeeTx{
-		Nonce:     msg.Nonce(),
-		GasFeeCap: msg.GasFeeCap(),
-		GasTipCap: msg.GasTipCap(),
-		Gas:       msg.Gas(),
-		To:        msg.To(),
-		Value:     msg.Value(),
-		Data:      msg.Data(),
+		Nonce:     msg.Nonce,
+		GasFeeCap: msg.GasFeeCap,
+		GasTipCap: msg.GasTipCap,
+		Gas:       msg.GasLimit,
+		To:        msg.To,
+		Value:     msg.Value,
+		Data:      msg.Data,
 	})
 
 	cfg, err := k.EVMConfig(ctx, sdk.ConsAddress(ctx.BlockHeader().ProposerAddress))
@@ -219,7 +223,7 @@ func (k Keeper) DerivedEVMCallWithData(
 	tmpCtx, commitState := ctx.CacheContext()
 
 	// pass true to commit the StateDB
-	res, err := k.ApplyMessageWithConfig(tmpCtx, msg, nil, true, cfg, txConfig)
+	res, err := k.ApplyMessageWithConfig(tmpCtx, msg, nil, true, cfg, txConfig, false)
 	if err != nil {
 		return nil, err
 	}
@@ -265,7 +269,7 @@ func (k Keeper) DerivedEVMCallWithData(
 		}
 
 		// adding txData for more info in rpc methods in order to parse derived txs
-		attrs = append(attrs, sdk.NewAttribute(types.AttributeKeyTxData, hexutil.Encode(msg.Data())))
+		attrs = append(attrs, sdk.NewAttribute(types.AttributeKeyTxData, hexutil.Encode(msg.Data)))
 		// adding nonce for more info in rpc methods in order to parse derived txs
 		attrs = append(attrs, sdk.NewAttribute(types.AttributeKeyTxNonce, strconv.FormatUint(nonce, 10)))
 		attrs = append(attrs, sdk.NewAttribute(types.AttributeKeyTxGasLimit, strconv.FormatUint(gasCap, 10)))
@@ -290,7 +294,7 @@ func (k Keeper) DerivedEVMCallWithData(
 		var bloomReceipt ethtypes.Bloom
 		if len(logs) > 0 {
 			bloom := k.GetBlockBloomTransient(ctx)
-			bloom.Or(bloom, big.NewInt(0).SetBytes(ethtypes.LogsBloom(logs)))
+			bloom.Or(bloom, big.NewInt(0).SetBytes(ethtypes.CreateBloom(&ethtypes.Receipt{Logs: logs}).Bytes()))
 			bloomReceipt = ethtypes.BytesToBloom(bloom.Bytes())
 			k.SetBlockBloomTransient(ctx, bloomReceipt.Big())
 			k.SetLogSizeTransient(ctx, (k.GetLogSizeTransient(ctx))+uint64(len(logs)))
