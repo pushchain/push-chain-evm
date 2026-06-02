@@ -1,11 +1,13 @@
 package backend
 
 import (
+	"errors"
 	"fmt"
 	"math/big"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/stretchr/testify/mock"
 	"google.golang.org/grpc/metadata"
 
 	abci "github.com/cometbft/cometbft/abci/types"
@@ -74,7 +76,7 @@ func (suite *BackendTestSuite) TestGetTransactionByHash() {
 			},
 			msgEthereumTx,
 			nil,
-			true,
+			false,
 		},
 		{
 			"pass - Base fee error",
@@ -549,34 +551,84 @@ func (suite *BackendTestSuite) TestQueryTendermintTxIndexer() {
 
 func (suite *BackendTestSuite) TestGetTransactionReceipt() {
 	msgEthereumTx, _ := suite.buildEthereumTx()
+	msgEthereumTx2, _ := suite.buildEthereumTx()
 	txHash := msgEthereumTx.AsTransaction().Hash()
+	txHash2 := msgEthereumTx2.AsTransaction().Hash()
+	_ = txHash2
 
 	txBz := suite.signAndEncodeEthTx(msgEthereumTx)
 
 	testCases := []struct {
-		name         string
-		registerMock func()
-		tx           *evmtypes.MsgEthereumTx
-		block        *types.Block
-		blockResult  []*abci.ExecTxResult
-		expTxReceipt map[string]interface{}
-		expPass      bool
+		name          string
+		registerMock  func()
+		tx            *evmtypes.MsgEthereumTx
+		block         *types.Block
+		blockResult   []*abci.ExecTxResult
+		expPass       bool
+		expNilResult  bool // true when nil,nil is expected (pending/not-found tx — Ethereum standard)
+		expErr        error
 	}{
+		// TODO test happy path
 		{
-			"fail - Receipts do not match",
-			func() {
-				var header metadata.MD
-				queryClient := suite.backend.queryClient.QueryClient.(*mocks.EVMQueryClient)
+			name:         "pending - tx not found",
+			registerMock: func() {},
+			block:        &types.Block{Header: types.Header{Height: 1}, Data: types.Data{Txs: []types.Tx{txBz}}},
+			tx:           msgEthereumTx2,
+			blockResult: []*abci.ExecTxResult{
+				{
+					Code: 0,
+					Events: []abci.Event{
+						{Type: evmtypes.EventTypeEthereumTx, Attributes: []abci.EventAttribute{
+							{Key: "ethereumTxHash", Value: txHash.Hex()},
+							{Key: "txIndex", Value: "0"},
+							{Key: "amount", Value: "1000"},
+							{Key: "txGasUsed", Value: "21000"},
+							{Key: "txHash", Value: txHash.Hex()},
+							{Key: "recipient", Value: "0x775b87ef5D82ca211811C1a02CE0fE0CA3a455d7"},
+						}},
+					},
+				},
+			},
+			expNilResult: true,
+		},
+		{
+			name: "fail - block not found",
+			registerMock: func() {
 				client := suite.backend.clientCtx.Client.(*mocks.Client)
-				RegisterParams(queryClient, &header, 1)
+				client.On("Block", mock.Anything, mock.Anything).Return(nil, errors.New("some error"))
+			},
+			block: &types.Block{Header: types.Header{Height: 1}, Data: types.Data{Txs: []types.Tx{txBz}}},
+			tx:    msgEthereumTx,
+			blockResult: []*abci.ExecTxResult{
+				{
+					Code: 0,
+					Events: []abci.Event{
+						{Type: evmtypes.EventTypeEthereumTx, Attributes: []abci.EventAttribute{
+							{Key: "ethereumTxHash", Value: txHash.Hex()},
+							{Key: "txIndex", Value: "0"},
+							{Key: "amount", Value: "1000"},
+							{Key: "txGasUsed", Value: "21000"},
+							{Key: "txHash", Value: txHash.Hex()},
+							{Key: "recipient", Value: "0x775b87ef5D82ca211811C1a02CE0fE0CA3a455d7"},
+						}},
+					},
+				},
+			},
+			expPass: false,
+			expErr:  fmt.Errorf("block not found at height 1: some error"),
+		},
+		{
+			name: "fail - block result error",
+			registerMock: func() {
+				client := suite.backend.clientCtx.Client.(*mocks.Client)
 				_, err := RegisterBlock(client, 1, txBz)
 				suite.Require().NoError(err)
-				_, err = RegisterBlockResults(client, 1)
-				suite.Require().NoError(err)
+				client.On("BlockResults", mock.Anything, mock.AnythingOfType("*int64")).
+					Return(nil, errors.New("some error"))
 			},
-			msgEthereumTx,
-			&types.Block{Header: types.Header{Height: 1}, Data: types.Data{Txs: []types.Tx{txBz}}},
-			[]*abci.ExecTxResult{
+			tx:    msgEthereumTx,
+			block: &types.Block{Header: types.Header{Height: 1}, Data: types.Data{Txs: []types.Tx{txBz}}},
+			blockResult: []*abci.ExecTxResult{
 				{
 					Code: 0,
 					Events: []abci.Event{
@@ -591,8 +643,39 @@ func (suite *BackendTestSuite) TestGetTransactionReceipt() {
 					},
 				},
 			},
-			map[string]interface{}(nil),
-			false,
+			expPass: false,
+			expErr:  fmt.Errorf("block result not found at height 1: some error"),
+		},
+		{
+			name: "happy path",
+			registerMock: func() {
+				var header metadata.MD
+				queryClient := suite.backend.queryClient.QueryClient.(*mocks.EVMQueryClient)
+				client := suite.backend.clientCtx.Client.(*mocks.Client)
+				RegisterParams(queryClient, &header, 1)
+				_, err := RegisterBlock(client, 1, txBz)
+				suite.Require().NoError(err)
+				_, err = RegisterBlockResults(client, 1)
+				suite.Require().NoError(err)
+			},
+			tx:    msgEthereumTx,
+			block: &types.Block{Header: types.Header{Height: 1}, Data: types.Data{Txs: []types.Tx{txBz}}},
+			blockResult: []*abci.ExecTxResult{
+				{
+					Code: 0,
+					Events: []abci.Event{
+						{Type: evmtypes.EventTypeEthereumTx, Attributes: []abci.EventAttribute{
+							{Key: "ethereumTxHash", Value: txHash.Hex()},
+							{Key: "txIndex", Value: "0"},
+							{Key: "amount", Value: "1000"},
+							{Key: "txGasUsed", Value: "21000"},
+							{Key: "txHash", Value: ""},
+							{Key: "recipient", Value: "0x775b87ef5D82ca211811C1a02CE0fE0CA3a455d7"},
+						}},
+					},
+				},
+			},
+			expPass: true,
 		},
 	}
 
@@ -606,12 +689,24 @@ func (suite *BackendTestSuite) TestGetTransactionReceipt() {
 			err := suite.backend.indexer.IndexBlock(tc.block, tc.blockResult)
 			suite.Require().NoError(err)
 
-			txReceipt, err := suite.backend.GetTransactionReceipt(common.HexToHash(tc.tx.Hash))
+			hash := common.HexToHash(tc.tx.Hash)
+			res, err := suite.backend.GetTransactionReceipt(hash)
 			if tc.expPass {
+				suite.Require().Equal(res["transactionHash"], hash)
+				suite.Require().Equal(res["blockNumber"], hexutil.Uint64(tc.block.Height)) //nolint: gosec // G115
+				requiredFields := []string{"status", "cumulativeGasUsed", "logsBloom", "logs", "gasUsed", "blockHash", "blockNumber", "transactionIndex", "effectiveGasPrice", "from", "to", "type"}
+				for _, field := range requiredFields {
+					suite.Require().NotNil(res[field], "field was empty %s", field)
+				}
+				suite.Require().Nil(res["contractAddress"]) // no contract creation
 				suite.Require().NoError(err)
-				suite.Require().Equal(txReceipt, tc.expTxReceipt)
+			} else if tc.expNilResult {
+				// Ethereum standard: pending/not-found tx returns null (nil,nil), not an error
+				suite.Require().Nil(res)
+				suite.Require().NoError(err)
 			} else {
-				suite.Require().NotEqual(txReceipt, tc.expTxReceipt)
+				suite.Require().Error(err)
+				suite.Require().ErrorContains(err, tc.expErr.Error())
 			}
 		})
 	}

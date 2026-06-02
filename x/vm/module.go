@@ -15,6 +15,7 @@ import (
 	"github.com/cosmos/evm/x/vm/keeper"
 	"github.com/cosmos/evm/x/vm/types"
 
+	"cosmossdk.io/core/address"
 	"cosmossdk.io/core/appmodule"
 
 	"github.com/cosmos/cosmos-sdk/client"
@@ -26,7 +27,9 @@ import (
 )
 
 // consensusVersion defines the current x/evm module consensus version.
-const consensusVersion = 8
+// Bumped to 2 for the v0.2.x → v0.3.x Params proto migration (ChainConfig
+// removed from field 5; allow_unprotected_txs and following fields shifted).
+const consensusVersion = 2
 
 var (
 	_ module.AppModuleBasic = AppModuleBasic{}
@@ -37,7 +40,9 @@ var (
 )
 
 // AppModuleBasic defines the basic application module used by the evm module.
-type AppModuleBasic struct{}
+type AppModuleBasic struct {
+	ac address.Codec
+}
 
 // Name returns the evm module's name.
 func (AppModuleBasic) Name() string {
@@ -87,8 +92,8 @@ func (AppModuleBasic) RegisterInterfaces(registry codectypes.InterfaceRegistry) 
 }
 
 // GetTxCmd returns the root tx command for the erc20 module.
-func (AppModuleBasic) GetTxCmd() *cobra.Command {
-	return cli.NewTxCmd()
+func (b AppModuleBasic) GetTxCmd() *cobra.Command {
+	return cli.NewTxCmd(b.ac)
 }
 
 // GetQueryCmd returns the root query command for the erc20 module.
@@ -106,9 +111,9 @@ type AppModule struct {
 }
 
 // NewAppModule creates a new AppModule object
-func NewAppModule(k *keeper.Keeper, ak types.AccountKeeper) AppModule {
+func NewAppModule(k *keeper.Keeper, ak types.AccountKeeper, ac address.Codec) AppModule {
 	return AppModule{
-		AppModuleBasic: AppModuleBasic{},
+		AppModuleBasic: AppModuleBasic{ac: ac},
 		keeper:         k,
 		ak:             ak,
 	}
@@ -119,16 +124,16 @@ func (AppModule) Name() string {
 	return types.ModuleName
 }
 
-// RegisterInvariants interface for registering invariants. Performs a no-op
-// as the evm module doesn't expose invariants.
-func (am AppModule) RegisterInvariants(_ sdk.InvariantRegistry) {
-}
-
 // RegisterServices registers a GRPC query service to respond to the
 // module-specific GRPC queries.
 func (am AppModule) RegisterServices(cfg module.Configurator) {
 	types.RegisterMsgServer(cfg.MsgServer(), am.keeper)
 	types.RegisterQueryServer(cfg.QueryServer(), am.keeper)
+
+	m := keeper.NewMigrator(*am.keeper)
+	if err := cfg.RegisterMigration(types.ModuleName, 1, m.Migrate1to2); err != nil {
+		panic(fmt.Sprintf("failed to register x/%s migration from version 1 to 2: %v", types.ModuleName, err))
+	}
 }
 
 // BeginBlock returns the begin blocker for the evm module.
