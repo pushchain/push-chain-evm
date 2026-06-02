@@ -1,6 +1,8 @@
 name: Solidity Test
 on:
+  merge_group:
   pull_request:
+  push:
     branches:
       - main
       - release/**
@@ -14,7 +16,24 @@ jobs:
         with:
           go-version: '1.22'
           check-latest: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
       - uses: actions/checkout@v4
+      - name: Cache Truffle solc compilers
+        uses: actions/cache@v4
+        with:
+          path: ~/.config/truffle/compilers
+          key: truffle-solc-0.8.18-0.5.17
+      - name: Pre-download solc compilers
+        run: |
+          mkdir -p ~/.config/truffle/compilers
+          [ -f ~/.config/truffle/compilers/soljson-v0.8.18+commit.87f61d96.js ] || \
+            curl -fL "https://raw.githubusercontent.com/ethereum/solc-bin/gh-pages/bin/soljson-v0.8.18+commit.87f61d96.js" \
+              -o ~/.config/truffle/compilers/soljson-v0.8.18+commit.87f61d96.js
+          [ -f ~/.config/truffle/compilers/soljson-v0.5.17+commit.d19bba13.js ] || \
+            curl -fL "https://raw.githubusercontent.com/ethereum/solc-bin/gh-pages/bin/soljson-v0.5.17+commit.d19bba13.js" \
+              -o ~/.config/truffle/compilers/soljson-v0.5.17+commit.d19bba13.js
       - uses: technote-space/get-diff-action@v6.1.2
         with:
           PATTERNS: |
