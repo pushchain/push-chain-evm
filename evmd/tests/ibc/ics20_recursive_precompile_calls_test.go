@@ -15,9 +15,9 @@ import (
 
 	"github.com/cosmos/evm/contracts"
 	"github.com/cosmos/evm/evmd"
-	evmibctesting "github.com/cosmos/evm/ibc/testing"
+	evmibctesting "github.com/cosmos/evm/testutil/ibc"
 	"github.com/cosmos/evm/precompiles/ics20"
-	"github.com/cosmos/evm/testutil/integration/os/factory"
+	testutiltypes "github.com/cosmos/evm/testutil/types"
 	"github.com/cosmos/evm/utils"
 	erc20types "github.com/cosmos/evm/x/erc20/types"
 	evmtypes "github.com/cosmos/evm/x/vm/types"
@@ -156,6 +156,7 @@ func (suite *ICS20RecursivePrecompileCallsTestSuite) setupContractForTesting(
 		deployerAddr,
 		contractAddr,
 		true,
+		nil,
 		"mint",
 		senderEVMAddr,
 		big.NewInt(InitialTokenAmount),
@@ -173,6 +174,7 @@ func (suite *ICS20RecursivePrecompileCallsTestSuite) setupContractForTesting(
 		deployerAddr,
 		contractAddr,
 		true,
+		nil,
 		"delegate",
 		vals[0].OperatorAddress,
 		big.NewInt(DelegationAmount),
@@ -211,8 +213,8 @@ func (suite *ICS20RecursivePrecompileCallsTestSuite) SetupTest() {
 
 	evmAppA := suite.chainA.App.(*evmd.EVMD)
 	suite.chainAPrecompile, _ = ics20.NewPrecompile(
-		*evmAppA.StakingKeeper,
 		evmAppA.BankKeeper,
+		*evmAppA.StakingKeeper,
 		evmAppA.TransferKeeper,
 		evmAppA.IBCKeeper.ChannelKeeper,
 		evmAppA.EVMKeeper,
@@ -228,11 +230,11 @@ func (suite *ICS20RecursivePrecompileCallsTestSuite) SetupTest() {
 
 	evmAppB := suite.chainB.App.(*evmd.EVMD)
 	suite.chainBPrecompile, _ = ics20.NewPrecompile(
+		evmAppB.BankKeeper,
 		*evmAppB.StakingKeeper,
-		evmAppA.BankKeeper,
 		evmAppB.TransferKeeper,
 		evmAppB.IBCKeeper.ChannelKeeper,
-		evmAppA.EVMKeeper,
+		evmAppB.EVMKeeper,
 	)
 }
 
@@ -261,7 +263,7 @@ func (suite *ICS20RecursivePrecompileCallsTestSuite) TestHandleMsgTransfer() {
 				contractData, err := contracts.LoadERC20RecursiveReverting()
 				suite.Require().NoError(err)
 
-				deploymentData := factory.ContractDeploymentData{
+				deploymentData := testutiltypes.ContractDeploymentData{
 					Contract:        contractData,
 					ConstructorArgs: []interface{}{"RecursiveRevertingToken", "RRCT", uint8(18)},
 				}
@@ -309,7 +311,7 @@ func (suite *ICS20RecursivePrecompileCallsTestSuite) TestHandleMsgTransfer() {
 				contractData, err := contracts.LoadERC20RecursiveNonReverting()
 				suite.Require().NoError(err)
 
-				deploymentData := factory.ContractDeploymentData{
+				deploymentData := testutiltypes.ContractDeploymentData{
 					Contract:        contractData,
 					ConstructorArgs: []interface{}{"RecursiveNonRevertingToken", "RNRCT", uint8(18)},
 				}
@@ -453,7 +455,7 @@ func (suite *ICS20RecursivePrecompileCallsTestSuite) TestHandleMsgTransfer() {
 			err = pathAToB.RelayPacket(packet)
 			suite.Require().NoError(err) // relay committed
 
-			feeAmt := FeeCoins().AmountOf(sourceDenomToTransfer)
+			feeAmt := evmibctesting.FeeCoins().AmountOf(sourceDenomToTransfer)
 
 			// One for UpdateClient() and one for AcknowledgePacket()
 			relayPacketFeeAmt := feeAmt.Mul(sdkmath.NewInt(2))
