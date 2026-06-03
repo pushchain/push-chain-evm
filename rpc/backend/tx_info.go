@@ -291,10 +291,11 @@ func (b *Backend) GetTransactionByBlockNumberAndIndex(blockNum rpctypes.BlockNum
 func (b *Backend) GetTxByEthHash(hash common.Hash) (*types.TxResult, *rpctypes.TxResultAdditionalFields, error) {
 	if b.Indexer != nil {
 		txRes, err := b.Indexer.GetByTxHash(hash)
-		if err != nil {
-			return nil, nil, err
+		if err == nil {
+			return txRes, nil, nil
 		}
-		return txRes, nil, nil
+		// KV miss — fall through to CometBFT. Derived txs are never written to
+		// the KV index but do emit ethereum_tx events, so CometBFT can serve them.
 	}
 
 	// fallback to CometBFT tx indexer
@@ -311,10 +312,10 @@ func (b *Backend) GetTxByEthHash(hash common.Hash) (*types.TxResult, *rpctypes.T
 func (b *Backend) GetTxByEthHashAndMsgIndex(hash common.Hash, index int) (*types.TxResult, *rpctypes.TxResultAdditionalFields, error) {
 	if b.Indexer != nil {
 		txRes, err := b.Indexer.GetByTxHash(hash)
-		if err != nil {
-			return nil, nil, err
+		if err == nil {
+			return txRes, nil, nil
 		}
-		return txRes, nil, nil
+		// KV miss — fall through to CometBFT for derived txs.
 	}
 
 	// fallback to CometBFT tx indexer
