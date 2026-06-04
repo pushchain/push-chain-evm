@@ -520,7 +520,11 @@ func (b *Backend) RPCBlockFromCometBlock(
 			rpcTx, err = rpctypes.NewRPCTransactionFromIncompleteMsg(ethMsg, common.BytesToHash(block.Hash()), height, index, baseFee, b.EvmChainID, txsAdditional[txIndex].Hash)
 		}
 		if err != nil {
-			b.Logger.Debug("NewTransactionFromData for receipt failed", "hash", ethMsg.Hash(), "error", err.Error())
+			logHash := ethMsg.Hash()
+			if txsAdditional[txIndex] != nil {
+				logHash = txsAdditional[txIndex].Hash
+			}
+			b.Logger.Debug("NewTransactionFromData for receipt failed", "hash", logHash, "error", err.Error())
 			continue
 		}
 		ethRPCTxs = append(ethRPCTxs, rpcTx)
@@ -661,22 +665,29 @@ func (b *Backend) GetBlockReceipts(
 		return nil, fmt.Errorf("block result not found for height %d", resBlock.Block.Height)
 	}
 
-	msgs, _ := b.EthMsgsFromCometBlock(resBlock, blockRes)
+	msgs, txsAdditional := b.EthMsgsFromCometBlock(resBlock, blockRes)
 	result := make([]map[string]interface{}, len(msgs))
 	blockHash := common.BytesToHash(resBlock.Block.Header.Hash()).Hex()
 	for i, msg := range msgs {
-		txResult, _, err := b.GetTxByEthHash(msg.Hash())
-		if err != nil {
-			return nil, fmt.Errorf("tx not found: hash=%s, error=%s", msg.Hash(), err.Error())
+		// For derived txs use the original event hash — the reconstructed LegacyTx
+		// hash from msg.Hash() won't be found by either the KV index or CometBFT.
+		var lookupHash common.Hash
+		if txsAdditional[i] != nil {
+			lookupHash = txsAdditional[i].Hash
+		} else {
+			lookupHash = msg.Hash()
 		}
-		result[i], err = b.formatTxReceipt(
-			msg,
-			txResult,
-			blockRes,
-			blockHash,
-		)
+		txResult, _, err := b.GetTxByEthHash(lookupHash)
 		if err != nil {
-			return nil, fmt.Errorf("failed to get transaction receipt for tx %s: %w", msg.Hash().Hex(), err)
+			return nil, fmt.Errorf("tx not found: hash=%s, error=%s", lookupHash, err.Error())
+		}
+		result[i], err = b.formatTxReceipt(msg, txResult, blockRes, blockHash)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get transaction receipt for tx %s: %w", lookupHash.Hex(), err)
+		}
+		// Override transactionHash for derived txs — same reason as in GetTransactionReceipt.
+		if txsAdditional[i] != nil {
+			result[i]["transactionHash"] = txsAdditional[i].Hash
 		}
 	}
 

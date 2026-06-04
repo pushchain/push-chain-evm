@@ -6,7 +6,6 @@ import (
 	"math"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/pkg/errors"
 
 	tmrpcclient "github.com/cometbft/cometbft/rpc/client"
@@ -268,29 +267,10 @@ func (b *Backend) TraceBlock(height rpctypes.BlockNumber,
 		b.Logger.Debug("block result not found", "height", block.Block.Height, "error", err.Error())
 		return nil, nil
 	}
-	txDecoder := b.ClientCtx.TxConfig.TxDecoder()
 
-	var txsMessages []*evmtypes.MsgEthereumTx
-	for i, tx := range txs {
-		if !rpctypes.TxSucessOrExpectedFailure(blockRes.TxsResults[i]) {
-			b.Logger.Debug("invalid tx result code", "cosmos-hash", hexutil.Encode(tx.Hash()))
-			continue
-		}
-		decodedTx, err := txDecoder(tx)
-		if err != nil {
-			b.Logger.Error("failed to decode transaction", "hash", txs[i].Hash(), "error", err.Error())
-			continue
-		}
-
-		for _, msg := range decodedTx.GetMsgs() {
-			ethMessage, ok := msg.(*evmtypes.MsgEthereumTx)
-			if !ok {
-				// Just considers Ethereum transactions
-				continue
-			}
-			txsMessages = append(txsMessages, ethMessage)
-		}
-	}
+	// EthMsgsFromCometBlock returns both native MsgEthereumTx and derived txs so
+	// that TraceBlock covers the full set of EVM-visible transactions in the block.
+	txsMessages, _ := b.EthMsgsFromCometBlock(block, blockRes)
 
 	// minus one to get the context at the beginning of the block
 	contextHeight := height - 1

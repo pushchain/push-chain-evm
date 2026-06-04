@@ -17,6 +17,7 @@ import (
 	"github.com/cometbft/cometbft/proto/tendermint/crypto"
 	cmtrpctypes "github.com/cometbft/cometbft/rpc/core/types"
 
+	rpctypes "github.com/cosmos/evm/rpc/types"
 	"github.com/cosmos/evm/rpc/types"
 	cosmosevmtypes "github.com/cosmos/evm/types"
 	"github.com/cosmos/evm/utils"
@@ -226,6 +227,20 @@ func (b *Backend) ProcessBlock(
 				reward = big.NewInt(0)
 			}
 			sorter = append(sorter, txGasAndReward{gasUsed: txGasUsed, reward: reward})
+		}
+		// Also account for derived txs in this Cosmos tx (gasPrice=0, tip=0).
+		results, additionals, err := rpctypes.ParseTxBlockResult(cometTxResult, tx, i, blockHeight)
+		if err != nil {
+			continue
+		}
+		for j, additional := range additionals {
+			if additional == nil {
+				continue // native tx already handled above
+			}
+			sorter = append(sorter, txGasAndReward{
+				gasUsed: results[j].GasUsed,
+				reward:  big.NewInt(0), // derived txs pay no priority fee
+			})
 		}
 	}
 
