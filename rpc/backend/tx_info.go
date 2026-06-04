@@ -216,7 +216,17 @@ func (b *Backend) GetTransactionReceipt(hash common.Hash) (map[string]interface{
 	}
 
 	blockHeaderHash := common.BytesToHash(resBlock.Block.Header.Hash()).Hex()
-	return b.formatTxReceipt(ethMsg, res, blockRes, blockHeaderHash)
+	result, err := b.formatTxReceipt(ethMsg, res, blockRes, blockHeaderHash)
+	if err != nil {
+		return nil, err
+	}
+	// formatTxReceipt uses ethMsg.Hash() which for derived txs is the hash of a
+	// reconstructed LegacyTx — different from the original event hash. Override
+	// so that eth_getTransactionReceipt and eth_getBlockByNumber agree.
+	if additional != nil {
+		result["transactionHash"] = additional.Hash
+	}
+	return result, nil
 }
 
 // GetTransactionLogs returns the transaction logs identified by hash.

@@ -491,7 +491,14 @@ func (b *Backend) RPCBlockFromCometBlock(
 	msgs, txsAdditional := b.EthMsgsFromCometBlock(resBlock, blockRes)
 	for txIndex, ethMsg := range msgs {
 		if !fullTx {
-			hash := ethMsg.Hash()
+			// For derived txs use the original event hash, not the reconstructed
+			// LegacyTx hash, so hash-only and full-tx block responses agree.
+			var hash common.Hash
+			if txsAdditional[txIndex] != nil {
+				hash = txsAdditional[txIndex].Hash
+			} else {
+				hash = ethMsg.Hash()
+			}
 			ethRPCTxs = append(ethRPCTxs, hash)
 			continue
 		}
