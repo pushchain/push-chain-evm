@@ -352,16 +352,23 @@ func (b *Backend) parseDerivedTxFromAdditionalFields(
 	recipient := additional.Recipient
 	gas := gasForDerivedEthTx(additional)
 
-	t := ethtypes.NewTx(&ethtypes.LegacyTx{
-		Nonce:    additional.Nonce,
-		Data:     additional.Data,
-		Gas:      gas,
-		To:       &recipient,
-		GasPrice: nil,
-		Value:    additional.Value,
-		V:        big.NewInt(0),
-		R:        big.NewInt(0),
-		S:        big.NewInt(0),
+	// Reconstruct as EIP-1559 (type 0x2) so clients receive yParity and the
+	// correct typed-tx format. GasFeeCap and GasTipCap are zero because the
+	// original fee values are not stored in the derived-tx events; the externally
+	// visible hash is always overridden with additional.Hash at the call site so
+	// the reconstructed hash here does not affect RPC consistency.
+	t := ethtypes.NewTx(&ethtypes.DynamicFeeTx{
+		ChainID:   b.EvmChainID,
+		Nonce:     additional.Nonce,
+		Data:      additional.Data,
+		Gas:       gas,
+		To:        &recipient,
+		Value:     additional.Value,
+		GasFeeCap: big.NewInt(0),
+		GasTipCap: big.NewInt(0),
+		V:         big.NewInt(0),
+		R:         big.NewInt(0),
+		S:         big.NewInt(0),
 	})
 	ethMsg := &evmtypes.MsgEthereumTx{}
 	ethMsg.FromEthereumTx(t)

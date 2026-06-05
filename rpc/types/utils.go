@@ -280,24 +280,33 @@ func NewRPCTransactionFromIncompleteMsg(
 	from := msg.GetSender()
 	v, r, s := tx.RawSignatureValues()
 	result := &RPCTransaction{
-		Type:     hexutil.Uint64(tx.Type()),
-		From:     from,
-		Gas:      hexutil.Uint64(tx.Gas()),
-		GasPrice: (*hexutil.Big)(tx.GasPrice()),
-		Hash:     txHash,
-		Input:    hexutil.Bytes(tx.Data()),
-		Nonce:    hexutil.Uint64(tx.Nonce()),
-		To:       tx.To(),
-		Value:    (*hexutil.Big)(tx.Value()),
-		V:        (*hexutil.Big)(v),
-		R:        (*hexutil.Big)(r),
-		S:        (*hexutil.Big)(s),
-		ChainID:  (*hexutil.Big)(chainID),
+		Type:    hexutil.Uint64(tx.Type()),
+		From:    from,
+		Gas:     hexutil.Uint64(tx.Gas()),
+		Hash:    txHash,
+		Input:   hexutil.Bytes(tx.Data()),
+		Nonce:   hexutil.Uint64(tx.Nonce()),
+		To:      tx.To(),
+		Value:   (*hexutil.Big)(tx.Value()),
+		V:       (*hexutil.Big)(v),
+		R:       (*hexutil.Big)(r),
+		S:       (*hexutil.Big)(s),
+		ChainID: (*hexutil.Big)(chainID),
 	}
 	if blockHash != (common.Hash{}) {
 		result.BlockHash = &blockHash
 		result.BlockNumber = (*hexutil.Big)(new(big.Int).SetUint64(blockNumber))
 		result.TransactionIndex = (*hexutil.Uint64)(&index)
+		// Derived txs pay exactly the base fee — no priority tip. Set gasPrice to
+		// baseFee so Blockscout's reward formula (tx_fees - burnt_fees) yields 0
+		// instead of a negative number (which happens when gasPrice = 0).
+		if baseFee != nil {
+			result.GasPrice = (*hexutil.Big)(new(big.Int).Set(baseFee))
+		} else {
+			result.GasPrice = (*hexutil.Big)(tx.GasPrice())
+		}
+	} else {
+		result.GasPrice = (*hexutil.Big)(tx.GasPrice())
 	}
 	return result, nil
 }

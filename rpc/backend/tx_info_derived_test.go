@@ -213,10 +213,13 @@ func buildBackendForReceipt(
 			},
 		}, nil)
 
-	// 4. EVMQueryClient.Params — BlockNumber() calls this; returning an error
-	//    makes ChainID() fall back to b.EvmChainID (safe, no gRPC needed).
+	// 4. EVMQueryClient mocks:
+	//    - Params: BlockNumber() calls this; error makes ChainID() fall back to EvmChainID
+	//    - BaseFee: formatTxReceipt calls this for DynamicFeeTx (type 0x2) effective gas price
 	mockEVMQueryClient := mocks.NewEVMQueryClient(t)
 	mockEVMQueryClient.On("Params", mock.Anything, mock.Anything, mock.Anything).
+		Return(nil, errors.New("no connection"))
+	mockEVMQueryClient.On("BaseFee", mock.Anything, mock.Anything, mock.Anything).
 		Return(nil, errors.New("no connection"))
 
 	b := &backend.Backend{
