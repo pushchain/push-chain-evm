@@ -274,16 +274,6 @@ func (k Keeper) DerivedEVMCallWithData(
 			attrs = append(attrs, sdk.NewAttribute(types.AttributeKeyEthereumTxFailed, res.VmError))
 		}
 
-		txLogAttrs := make([]sdk.Attribute, len(res.Logs))
-		for i, log := range res.Logs {
-			log.TxHash = ethTxHash
-			value, err := json.Marshal(log)
-			if err != nil {
-				return nil, errorsmod.Wrap(err, "failed to encode log")
-			}
-			txLogAttrs[i] = sdk.NewAttribute(types.AttributeKeyTxLog, string(value))
-		}
-
 		// adding txData for more info in rpc methods in order to parse derived txs
 		attrs = append(attrs, sdk.NewAttribute(types.AttributeKeyTxData, hexutil.Encode(msg.Data())))
 		// adding nonce for more info in rpc methods in order to parse derived txs
@@ -295,10 +285,6 @@ func (k Keeper) DerivedEVMCallWithData(
 				attrs...,
 			),
 			sdk.NewEvent(
-				types.EventTypeTxLog,
-				txLogAttrs...,
-			),
-			sdk.NewEvent(
 				sdk.EventTypeMessage,
 				sdk.NewAttribute(sdk.AttributeKeyModule, types.ModuleName),
 				sdk.NewAttribute(sdk.AttributeKeySender, from.Hex()),
@@ -306,14 +292,33 @@ func (k Keeper) DerivedEVMCallWithData(
 			),
 		})
 
-		logs := types.LogsToEthereum(res.Logs)
-		var bloomReceipt ethtypes.Bloom
-		if len(logs) > 0 {
-			bloom := k.GetBlockBloomTransient(ctx)
-			bloom.Or(bloom, big.NewInt(0).SetBytes(ethtypes.LogsBloom(logs)))
-			bloomReceipt = ethtypes.BytesToBloom(bloom.Bytes())
-			k.SetBlockBloomTransient(ctx, bloomReceipt.Big())
-			k.SetLogSizeTransient(ctx, (k.GetLogSizeTransient(ctx))+uint64(len(logs)))
+		if !res.Failed() {
+			txLogAttrs := make([]sdk.Attribute, len(res.Logs))
+			for i, log := range res.Logs {
+				log.TxHash = ethTxHash
+				value, err := json.Marshal(log)
+				if err != nil {
+					return nil, errorsmod.Wrap(err, "failed to encode log")
+				}
+				txLogAttrs[i] = sdk.NewAttribute(types.AttributeKeyTxLog, string(value))
+			}
+
+			ctx.EventManager().EmitEvents(sdk.Events{
+				sdk.NewEvent(
+					types.EventTypeTxLog,
+					txLogAttrs...,
+				),
+			})
+
+			logs := types.LogsToEthereum(res.Logs)
+			var bloomReceipt ethtypes.Bloom
+			if len(logs) > 0 {
+				bloom := k.GetBlockBloomTransient(ctx)
+				bloom.Or(bloom, big.NewInt(0).SetBytes(ethtypes.LogsBloom(logs)))
+				bloomReceipt = ethtypes.BytesToBloom(bloom.Bytes())
+				k.SetBlockBloomTransient(ctx, bloomReceipt.Big())
+				k.SetLogSizeTransient(ctx, (k.GetLogSizeTransient(ctx))+uint64(len(logs)))
+			}
 		}
 	}
 
