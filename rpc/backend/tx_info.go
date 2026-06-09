@@ -410,10 +410,10 @@ func (b *Backend) GetTransactionByBlockNumberAndIndex(blockNum rpctypes.BlockNum
 func (b *Backend) GetTxByEthHash(hash common.Hash) (*types.TxResult, *rpctypes.TxResultAdditionalFields, error) {
 	if b.indexer != nil {
 		txRes, err := b.indexer.GetByTxHash(hash)
-		if err != nil {
-			return nil, nil, err
+		if err == nil {
+			return txRes, nil, nil
 		}
-		return txRes, nil, nil
+		// indexer miss or no derived-tx metadata — fall through to event-query reconstruction
 	}
 
 	// fallback to tendermint tx indexer
@@ -430,10 +430,10 @@ func (b *Backend) GetTxByEthHash(hash common.Hash) (*types.TxResult, *rpctypes.T
 func (b *Backend) GetTxByEthHashAndMsgIndex(hash common.Hash, index int) (*types.TxResult, *rpctypes.TxResultAdditionalFields, error) {
 	if b.indexer != nil {
 		txRes, err := b.indexer.GetByTxHash(hash)
-		if err != nil {
-			return nil, nil, err
+		if err == nil {
+			return txRes, nil, nil
 		}
-		return txRes, nil, nil
+		// indexer miss or no derived-tx metadata — fall through to event-query reconstruction
 	}
 
 	// fallback to tendermint tx indexer
