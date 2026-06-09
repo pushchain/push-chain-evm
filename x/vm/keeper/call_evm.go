@@ -229,13 +229,12 @@ func (k Keeper) DerivedEVMCallWithData(
 	// thus restricted to be used only inside `ApplyMessage`.
 	tmpCtx, commitState := ctx.CacheContext()
 
-	// pass true to commit the StateDB
-	res, err := k.ApplyMessageWithConfig(tmpCtx, msg, nil, true, cfg, txConfig, true)
+	res, err := k.ApplyMessageWithConfig(tmpCtx, msg, nil, commit, cfg, txConfig, true)
 	if err != nil {
 		return nil, err
 	}
 
-	if !res.Failed() {
+	if commit && !res.Failed() {
 		commitState()
 	}
 
@@ -251,8 +250,7 @@ func (k Keeper) DerivedEVMCallWithData(
 			sdk.NewAttribute(sdk.AttributeKeyAmount, value.String()),
 			// add event for ethereum transaction hash format;
 			sdk.NewAttribute(types.AttributeKeyEthereumTxHash, ethTxHash),
-			// add event for index of valid ethereum tx; NOTE: default txindex for derivedTx
-			sdk.NewAttribute(types.AttributeKeyTxIndex, strconv.FormatUint(types.DerivedTxIndex, 10)),
+			sdk.NewAttribute(types.AttributeKeyTxIndex, strconv.FormatUint(uint64(txConfig.TxIndex), 10)),
 			// add event for eth tx gas used, we can't get it from cosmos tx result when it contains multiple eth tx msgs.
 			sdk.NewAttribute(types.AttributeKeyTxGasUsed, strconv.FormatUint(gasUsed, 10)),
 		}...)
@@ -263,16 +261,6 @@ func (k Keeper) DerivedEVMCallWithData(
 		}
 		if res.Failed() {
 			attrs = append(attrs, sdk.NewAttribute(types.AttributeKeyEthereumTxFailed, res.VmError))
-		}
-
-		txLogAttrs := make([]sdk.Attribute, len(res.Logs))
-		for i, log := range res.Logs {
-			log.TxHash = ethTxHash
-			value, err := json.Marshal(log)
-			if err != nil {
-				return nil, errorsmod.Wrap(err, "failed to encode log")
-			}
-			txLogAttrs[i] = sdk.NewAttribute(types.AttributeKeyTxLog, string(value))
 		}
 
 		// adding txData for more info in rpc methods in order to parse derived txs
@@ -286,10 +274,6 @@ func (k Keeper) DerivedEVMCallWithData(
 				attrs...,
 			),
 			sdk.NewEvent(
-				types.EventTypeTxLog,
-				txLogAttrs...,
-			),
-			sdk.NewEvent(
 				sdk.EventTypeMessage,
 				sdk.NewAttribute(sdk.AttributeKeyModule, types.ModuleName),
 				sdk.NewAttribute(sdk.AttributeKeySender, from.Hex()),
@@ -297,15 +281,36 @@ func (k Keeper) DerivedEVMCallWithData(
 			),
 		})
 
-		logs := types.LogsToEthereum(res.Logs)
-		var bloomReceipt ethtypes.Bloom
-		if len(logs) > 0 {
-			bloom := k.GetBlockBloomTransient(ctx)
-			bloom.Or(bloom, big.NewInt(0).SetBytes(ethtypes.CreateBloom(&ethtypes.Receipt{Logs: logs}).Bytes()))
-			bloomReceipt = ethtypes.BytesToBloom(bloom.Bytes())
-			k.SetBlockBloomTransient(ctx, bloomReceipt.Big())
-			k.SetLogSizeTransient(ctx, (k.GetLogSizeTransient(ctx))+uint64(len(logs)))
+		if !res.Failed() {
+			txLogAttrs := make([]sdk.Attribute, len(res.Logs))
+			for i, log := range res.Logs {
+				log.TxHash = ethTxHash
+				value, err := json.Marshal(log)
+				if err != nil {
+					return nil, errorsmod.Wrap(err, "failed to encode log")
+				}
+				txLogAttrs[i] = sdk.NewAttribute(types.AttributeKeyTxLog, string(value))
+			}
+
+			ctx.EventManager().EmitEvents(sdk.Events{
+				sdk.NewEvent(
+					types.EventTypeTxLog,
+					txLogAttrs...,
+				),
+			})
+
+			logs := types.LogsToEthereum(res.Logs)
+			var bloomReceipt ethtypes.Bloom
+			if len(logs) > 0 {
+				bloom := k.GetBlockBloomTransient(ctx)
+				bloom.Or(bloom, big.NewInt(0).SetBytes(ethtypes.CreateBloom(&ethtypes.Receipt{Logs: logs}).Bytes()))
+				bloomReceipt = ethtypes.BytesToBloom(bloom.Bytes())
+				k.SetBlockBloomTransient(ctx, bloomReceipt.Big())
+				k.SetLogSizeTransient(ctx, (k.GetLogSizeTransient(ctx))+uint64(len(logs)))
+			}
 		}
+
+		k.SetTxIndexTransient(ctx, uint64(txConfig.TxIndex)+1)
 	}
 
 	if res.Failed() {
