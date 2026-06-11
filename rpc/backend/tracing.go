@@ -74,43 +74,16 @@ func (b *Backend) TraceTransaction(hash common.Hash, config *evmtypes.TraceConfi
 		}
 
 		if txAdditional != nil {
-			// This is a derived tx, fetch all derived txs from events in this Cosmos tx.
-			// Use predecessorTx.TxIndex (Cosmos slot) — not i (Ethereum index) — when
-			// indexing into block-level arrays.
-			cosmosTxIdx := int(predecessorTx.TxIndex)
-			blockRes, err := b.rpcClient.BlockResults(b.ctx, &blk.Block.Height)
-			if err == nil && blockRes != nil && cosmosTxIdx < len(blockRes.TxsResults) {
-				txResult := blockRes.TxsResults[cosmosTxIdx]
-				cosmosTx, err := b.clientCtx.TxConfig.TxDecoder()(blk.Block.Txs[cosmosTxIdx])
-				if err == nil {
-					parsedTxs, err := rpctypes.ParseTxResult(txResult, cosmosTx)
-					if err == nil {
-						for _, parsedTx := range parsedTxs.Txs {
-							// Stop when we reach the current transaction
-							if parsedTx.Hash == txAdditional.Hash {
-								break
-							}
-							// Only include derived txs
-							if parsedTx.Type == evmtypes.DerivedTxType {
-								ethMsg := b.parseDerivedTxFromAdditionalFields(&rpctypes.TxResultAdditionalFields{
-									Value:     parsedTx.Amount,
-									Hash:      parsedTx.Hash,
-									TxHash:    parsedTx.TxHash,
-									Type:      parsedTx.Type,
-									Recipient: parsedTx.Recipient,
-									Sender:    parsedTx.Sender,
-									GasUsed:   parsedTx.GasUsed,
-									Data:      parsedTx.Data,
-									Nonce:     parsedTx.Nonce,
-									GasLimit:  &parsedTx.GasLimit,
-								})
-								if ethMsg != nil {
-									predecessors = append(predecessors, ethMsg)
-								}
-							}
-						}
-					}
-				}
+			// Derived tx: add it directly. The old approach scanned parsedTxs.Txs
+			// for "all derived txs before txAdditional.Hash", which (a) skipped the
+			// tx at txAdditional.Hash itself — so the last derived tx in a series
+			// was always missed — and (b) double-counted earlier derived txs that
+			// were already added by their own outer-loop iterations. Each iteration
+			// of this loop corresponds to exactly one Ethereum execution, so adding
+			// txAdditional directly is both correct and complete.
+			ethMsg := b.parseDerivedTxFromAdditionalFields(txAdditional)
+			if ethMsg != nil {
+				predecessors = append(predecessors, ethMsg)
 			}
 			continue
 		}
