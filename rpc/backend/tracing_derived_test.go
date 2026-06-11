@@ -45,7 +45,7 @@ func derivedBlockResults(hash common.Hash, sender, recipient common.Address) *co
 	attrs := []abci.EventAttribute{
 		{Key: "amount", Value: "0"},
 		{Key: evmtypes.AttributeKeyEthereumTxHash, Value: hash.Hex()},
-		{Key: evmtypes.AttributeKeyTxIndex, Value: fmt.Sprintf("%d", evmtypes.DerivedTxIndex)},
+		{Key: evmtypes.AttributeKeyTxIndex, Value: "0"},
 		{Key: evmtypes.AttributeKeyTxGasUsed, Value: "21000"},
 		{Key: evmtypes.AttributeKeyRecipient, Value: recipient.Hex()},
 		{Key: evmtypes.AttributeKeyTxData, Value: "0x"},

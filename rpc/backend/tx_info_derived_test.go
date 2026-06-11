@@ -39,6 +39,7 @@ func (s *stubIndexer) GetByTxHash(_ common.Hash) (*cosmosevmtypes.TxResult, erro
 func (s *stubIndexer) GetByBlockAndIndex(_ int64, _ int32) (*cosmosevmtypes.TxResult, error) {
 	return nil, errors.New("tx not found")
 }
+func (s *stubIndexer) IsDerivedTx(_ common.Hash) (bool, error) { return false, nil }
 
 // derivedTxSearchResult builds a fake CometBFT TxSearch response containing
 // the ethereum_tx events that a derived tx emits (see x/vm/keeper/call_evm.go).
@@ -46,7 +47,7 @@ func derivedTxSearchResult(hash common.Hash, sender, recipient common.Address) *
 	attrs := []abci.EventAttribute{
 		{Key: "amount", Value: "0"},
 		{Key: evmtypes.AttributeKeyEthereumTxHash, Value: hash.Hex()},
-		{Key: evmtypes.AttributeKeyTxIndex, Value: fmt.Sprintf("%d", evmtypes.DerivedTxIndex)},
+		{Key: evmtypes.AttributeKeyTxIndex, Value: "0"},
 		{Key: evmtypes.AttributeKeyTxGasUsed, Value: "21000"},
 		{Key: evmtypes.AttributeKeyRecipient, Value: recipient.Hex()},
 		{Key: evmtypes.AttributeKeyTxData, Value: "0x"},
@@ -165,6 +166,7 @@ func (s *stubNativeIndexer) GetByTxHash(h common.Hash) (*cosmosevmtypes.TxResult
 func (s *stubNativeIndexer) GetByBlockAndIndex(_ int64, _ int32) (*cosmosevmtypes.TxResult, error) {
 	return nil, errors.New("tx not found")
 }
+func (s *stubNativeIndexer) IsDerivedTx(_ common.Hash) (bool, error) { return false, nil }
 
 // ---------------------------------------------------------------------------
 // GetTransactionReceipt tests
@@ -264,7 +266,6 @@ func TestGetTransactionReceipt_DerivedTx(t *testing.T) {
 	require.True(t, ok, "to should be *common.Address")
 	require.Equal(t, recipient, *to, "to address should match the derived tx recipient")
 
-	// transactionIndex is DerivedTxIndex (9999) — known sentinel for derived txs
 	require.NotNil(t, receipt["transactionIndex"])
 }
 

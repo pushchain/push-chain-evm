@@ -17,4 +17,6 @@ type EVMTxIndexer interface {
 	GetByTxHash(common.Hash) (*TxResult, error)
 	// GetByBlockAndIndex returns nil if tx not found.
 	GetByBlockAndIndex(int64, int32) (*TxResult, error)
+	// IsDerivedTx reports whether the hash was indexed as a derived (event-only) EVM tx.
+	IsDerivedTx(common.Hash) (bool, error)
 }

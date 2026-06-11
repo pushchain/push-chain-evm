@@ -733,11 +733,18 @@ func (b *Backend) formatTxReceipt(
 		return nil, err
 	}
 
-	// parse tx logs from events
-	msgIndex := int(txResult.MsgIndex) // #nosec G115 -- checked for int overflow already
-	logs, err := evmtypes.TxLogsFromEvents(blockRes.TxsResults[txResult.TxIndex].Events, msgIndex)
-	if err != nil {
-		b.Logger.Debug("failed to parse logs", "hash", ethMsg.Hash().String(), "error", err.Error())
+	// Failed transactions yield no logs — consistent with GetTransactionLogs and with
+	// Ethereum receipt semantics (a reverted tx exposes an empty logs array). Gating
+	// here also makes the receipt independent of whatever (empty) tx_log event a failed
+	// derived tx emitted.
+	var logs []*ethtypes.Log
+	if !txResult.Failed {
+		msgIndex := int(txResult.MsgIndex) // #nosec G115 -- checked for int overflow already
+		var err error
+		logs, err = evmtypes.TxLogsFromEvents(blockRes.TxsResults[txResult.TxIndex].Events, msgIndex)
+		if err != nil {
+			b.Logger.Debug("failed to parse logs", "hash", ethMsg.Hash().String(), "error", err.Error())
+		}
 	}
 
 	// return error if still unable to find the eth tx index
