@@ -25,9 +25,11 @@ import (
 	evmtypes "github.com/cosmos/evm/x/vm/types"
 
 	"github.com/cosmos/cosmos-sdk/client"
+	codectypes "github.com/cosmos/cosmos-sdk/codec/types"
 	"github.com/cosmos/cosmos-sdk/crypto/keyring"
 	"github.com/cosmos/cosmos-sdk/server"
 	sdk "github.com/cosmos/cosmos-sdk/types"
+	authtx "github.com/cosmos/cosmos-sdk/x/auth/tx"
 )
 
 type BackendTestSuite struct {
@@ -172,6 +174,39 @@ func (suite *BackendTestSuite) generateTestKeyring(clientDir string) (keyring.Ke
 	buf := bufio.NewReader(os.Stdin)
 	encCfg := encoding.MakeConfig()
 	return keyring.New(sdk.KeyringServiceName(), keyring.BackendTest, clientDir, buf, encCfg.Codec, []keyring.Option{hd.EthSecp256k1Option()}...)
+}
+
+// buildAndEncodeMultiMsgEthTx builds a single EVM Cosmos tx containing multiple
+// MsgEthereumTx messages. Each message is signed with a fresh ephemeral key (so
+// their hashes are unique even when underlying tx params are identical) and From is
+// cleared to "" as BuildTx does. Callers should compute hashes via
+// msg.AsTransaction().Hash() after this call returns.
+func (suite *BackendTestSuite) buildAndEncodeMultiMsgEthTx(msgs ...*evmtypes.MsgEthereumTx) []byte {
+	ethSigner := ethtypes.LatestSigner(suite.backend.ChainConfig())
+	for _, msg := range msgs {
+		from, priv := utiltx.NewAddrKey()
+		signer := utiltx.NewSigner(priv)
+		msg.From = from.String()
+		suite.Require().NoError(msg.Sign(ethSigner, signer))
+		msg.From = ""
+	}
+
+	extBuilder, ok := suite.backend.clientCtx.TxConfig.NewTxBuilder().(authtx.ExtensionOptionsTxBuilder)
+	suite.Require().True(ok)
+
+	option, err := codectypes.NewAnyWithValue(&evmtypes.ExtensionOptionsEthereumTx{})
+	suite.Require().NoError(err)
+	extBuilder.SetExtensionOptions(option)
+
+	sdkMsgs := make([]sdk.Msg, len(msgs))
+	for i, msg := range msgs {
+		sdkMsgs[i] = msg
+	}
+	suite.Require().NoError(extBuilder.SetMsgs(sdkMsgs...))
+
+	bz, err := suite.backend.clientCtx.TxConfig.TxEncoder()(extBuilder.GetTx())
+	suite.Require().NoError(err)
+	return bz
 }
 
 func (suite *BackendTestSuite) signAndEncodeEthTx(msgEthereumTx *evmtypes.MsgEthereumTx) []byte {

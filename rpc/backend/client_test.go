@@ -45,6 +45,49 @@ func RegisterTxSearchEmpty(client *mocks.Client, query string) {
 		Return(&cmtrpctypes.ResultTxSearch{}, nil)
 }
 
+// RegisterTxSearchWithResult registers a TxSearch mock that returns a single ResultTx
+// with explicit raw tx bytes (nil for derived txs with no Cosmos envelope), block height,
+// Cosmos-tx-slot index, and ABCI events. This is needed when the KV indexer has no
+// entry (e.g. derived txs, or EVM txs whose KV EthTxIndex is wrong because derived txs
+// shifted the counter) and the code falls through to CometBFT TxSearch.
+func RegisterTxSearchWithResult(
+	client *mocks.Client,
+	query string,
+	height int64,
+	txSlot uint32,
+	txBz types.Tx,
+	events []abci.Event,
+) {
+	resultTx := &cmtrpctypes.ResultTx{
+		Height: height,
+		Index:  txSlot,
+		Tx:     txBz,
+		TxResult: abci.ExecTxResult{
+			Code:   0,
+			Events: events,
+		},
+	}
+	client.On("TxSearch", rpc.ContextWithHeight(1), query, false, (*int)(nil), (*int)(nil), "").
+		Return(&cmtrpctypes.ResultTxSearch{Txs: []*cmtrpctypes.ResultTx{resultTx}, TotalCount: 1}, nil)
+}
+
+// RegisterBlockResultsWithTxs registers a BlockResults mock with custom per-slot ABCI
+// results. Required when the after-loop derived-tx section in TraceTransaction fetches
+// BlockResults to scan for intra-slot derived-tx predecessor ordering.
+func RegisterBlockResultsWithTxs(
+	client *mocks.Client,
+	height int64,
+	txResults []*abci.ExecTxResult,
+) *cmtrpctypes.ResultBlockResults {
+	res := &cmtrpctypes.ResultBlockResults{
+		Height:     height,
+		TxsResults: txResults,
+	}
+	client.On("BlockResults", rpc.ContextWithHeight(height), mock.AnythingOfType("*int64")).
+		Return(res, nil)
+	return res
+}
+
 func RegisterTxSearchError(client *mocks.Client, query string) {
 	client.On("TxSearch", rpc.ContextWithHeight(1), query, false, (*int)(nil), (*int)(nil), "").
 		Return(nil, errortypes.ErrInvalidRequest)
