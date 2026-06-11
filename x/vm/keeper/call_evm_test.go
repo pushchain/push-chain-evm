@@ -243,4 +243,27 @@ func (suite *KeeperTestSuite) TestDerivedEVMCallFailedExecutionNoBloomSideEffect
 	ethTx, txLog := countEthTxAndLogEvents(ctx.EventManager().Events())
 	suite.Require().Equal(1, ethTx, "failed derived tx still emits its ethereum_tx receipt")
 	suite.Require().Equal(1, txLog, "failed derived tx still emits an (empty) tx_log to preserve alignment")
+
+	// The tx_log emitted on failure MUST carry no log attributes — otherwise the fix
+	// would publish phantom logs for state that was never committed.
+	suite.Require().Equal(0, txLogAttrCount(ctx.EventManager().Events()),
+		"a reverted derived tx must not emit any log attributes")
+
+	// Sanity: a successful transfer DOES produce a non-empty tx_log (ERC20 Transfer
+	// event), so the empty-on-failure result above is not trivially always-empty.
+	okCtx := suite.network.GetContext().WithEventManager(sdk.NewEventManager())
+	suite.Require().NoError(suite.derivedTransfer(okCtx, owner, contractAddr, recipient))
+	suite.Require().Positive(txLogAttrCount(okCtx.EventManager().Events()),
+		"a successful derived tx must emit its logs")
+}
+
+// txLogAttrCount returns the total number of tx_log attributes across all tx_log events.
+func txLogAttrCount(events []sdk.Event) int {
+	n := 0
+	for _, e := range events {
+		if e.Type == evmtypes.EventTypeTxLog {
+			n += len(e.Attributes)
+		}
+	}
+	return n
 }
