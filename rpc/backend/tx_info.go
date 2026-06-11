@@ -239,7 +239,10 @@ func (b *Backend) GetTransactionReceipt(hash common.Hash) (map[string]interface{
 		return nil, errors.New("failed to parse receipt")
 	}
 
-	// failed transactions yield no logs — consistent with GetTransactionLogs
+	// Failed transactions yield no logs — consistent with GetTransactionLogs and with
+	// Ethereum receipt semantics (a reverted tx exposes an empty logs array). Gating
+	// here also makes the receipt independent of whatever (empty) tx_log event a failed
+	// derived tx emitted.
 	var logs []*ethtypes.Log
 	if !res.Failed {
 		msgIndex := int(res.MsgIndex) // #nosec G115 -- checked for int overflow already
@@ -414,10 +417,10 @@ func (b *Backend) GetTransactionByBlockNumberAndIndex(blockNum rpctypes.BlockNum
 func (b *Backend) GetTxByEthHash(hash common.Hash) (*types.TxResult, *rpctypes.TxResultAdditionalFields, error) {
 	if b.indexer != nil {
 		txRes, err := b.indexer.GetByTxHash(hash)
-		if err == nil {
-			return txRes, nil, nil
+		if err != nil {
+			return nil, nil, err
 		}
-		// indexer miss or no derived-tx metadata — fall through to event-query reconstruction
+		return txRes, nil, nil
 	}
 
 	// fallback to tendermint tx indexer
@@ -434,10 +437,10 @@ func (b *Backend) GetTxByEthHash(hash common.Hash) (*types.TxResult, *rpctypes.T
 func (b *Backend) GetTxByEthHashAndMsgIndex(hash common.Hash, index int) (*types.TxResult, *rpctypes.TxResultAdditionalFields, error) {
 	if b.indexer != nil {
 		txRes, err := b.indexer.GetByTxHash(hash)
-		if err == nil {
-			return txRes, nil, nil
+		if err != nil {
+			return nil, nil, err
 		}
-		// indexer miss or no derived-tx metadata — fall through to event-query reconstruction
+		return txRes, nil, nil
 	}
 
 	// fallback to tendermint tx indexer
