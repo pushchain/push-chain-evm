@@ -465,14 +465,15 @@ func (b *Backend) derivedTxAdditionalFields(hash common.Hash, res *types.TxResul
 func (b *Backend) GetTxByEthHash(hash common.Hash) (*types.TxResult, *rpctypes.TxResultAdditionalFields, error) {
 	if b.indexer != nil {
 		txRes, err := b.indexer.GetByTxHash(hash)
-		if err != nil {
-			return nil, nil, err
+		if err == nil {
+			// indexer hit: rebuild additional fields when this is a derived tx
+			additional, derr := b.derivedTxAdditionalFields(hash, txRes)
+			if derr != nil {
+				return nil, nil, derr
+			}
+			return txRes, additional, nil
 		}
-		additional, err := b.derivedTxAdditionalFields(hash, txRes)
-		if err != nil {
-			return nil, nil, err
-		}
-		return txRes, additional, nil
+		// indexer miss — fall through to event-query (tx_search) reconstruction
 	}
 
 	// fallback to tendermint tx indexer
@@ -489,14 +490,15 @@ func (b *Backend) GetTxByEthHash(hash common.Hash) (*types.TxResult, *rpctypes.T
 func (b *Backend) GetTxByEthHashAndMsgIndex(hash common.Hash, index int) (*types.TxResult, *rpctypes.TxResultAdditionalFields, error) {
 	if b.indexer != nil {
 		txRes, err := b.indexer.GetByTxHash(hash)
-		if err != nil {
-			return nil, nil, err
+		if err == nil {
+			// indexer hit: rebuild additional fields when this is a derived tx
+			additional, derr := b.derivedTxAdditionalFields(hash, txRes)
+			if derr != nil {
+				return nil, nil, derr
+			}
+			return txRes, additional, nil
 		}
-		additional, err := b.derivedTxAdditionalFields(hash, txRes)
-		if err != nil {
-			return nil, nil, err
-		}
-		return txRes, additional, nil
+		// indexer miss — fall through to event-query (tx_search) reconstruction
 	}
 
 	// fallback to tendermint tx indexer

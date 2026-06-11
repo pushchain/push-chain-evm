@@ -308,6 +308,47 @@ func (suite *BackendTestSuite) TestGetTxByEthHash() {
 	}
 }
 
+// TestGetTxByEthHashFallsThroughOnIndexerMiss is a regression test for F-2026-17740.
+// When the KV indexer is enabled but misses a hash (e.g. a derived tx that the indexer
+// never recorded), GetTxByEthHash must fall through to the CometBFT tx_search
+// reconstruction instead of returning the indexer's not-found error. Before the fix the
+// function short-circuited on the indexer error and never queried tx_search.
+func (suite *BackendTestSuite) TestGetTxByEthHashFallsThroughOnIndexerMiss() {
+	msgEthereumTx, bz := suite.buildEthereumTx()
+	hash := common.HexToHash(msgEthereumTx.Hash)
+
+	suite.SetupTest()
+	// Enabled but empty indexer -> GetByTxHash returns a miss.
+	suite.backend.indexer = indexer.NewKVIndexer(dbm.NewMemDB(), log.NewNopLogger(), suite.backend.clientCtx)
+
+	client := suite.backend.clientCtx.Client.(*mocks.Client)
+	query := fmt.Sprintf("%s.%s='%s'", evmtypes.TypeMsgEthereumTx, evmtypes.AttributeKeyEthereumTxHash, hash.Hex())
+	RegisterTxSearch(client, query, bz)
+
+	_, _, _ = suite.backend.GetTxByEthHash(hash)
+
+	// The fallback (tx_search) must have been reached on the indexer miss.
+	client.AssertNumberOfCalls(suite.T(), "TxSearch", 1)
+}
+
+// TestGetTxByEthHashAndMsgIndexFallsThroughOnIndexerMiss is the F-2026-17740 regression
+// test for the msg-index variant: an indexer miss must also fall through to tx_search.
+func (suite *BackendTestSuite) TestGetTxByEthHashAndMsgIndexFallsThroughOnIndexerMiss() {
+	msgEthereumTx, bz := suite.buildEthereumTx()
+	hash := common.HexToHash(msgEthereumTx.Hash)
+
+	suite.SetupTest()
+	suite.backend.indexer = indexer.NewKVIndexer(dbm.NewMemDB(), log.NewNopLogger(), suite.backend.clientCtx)
+
+	client := suite.backend.clientCtx.Client.(*mocks.Client)
+	query := fmt.Sprintf("%s.%s='%s'", evmtypes.TypeMsgEthereumTx, evmtypes.AttributeKeyEthereumTxHash, hash.Hex())
+	RegisterTxSearch(client, query, bz)
+
+	_, _, _ = suite.backend.GetTxByEthHashAndMsgIndex(hash, 0)
+
+	client.AssertNumberOfCalls(suite.T(), "TxSearch", 1)
+}
+
 func (suite *BackendTestSuite) TestGetTransactionByBlockHashAndIndex() {
 	_, bz := suite.buildEthereumTx()
 
