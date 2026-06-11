@@ -61,7 +61,11 @@ func (suite *BackendTestSuite) TestTraceTransaction() {
 	}{
 		{
 			"fail - tx not found",
-			func() {},
+			func() {
+				client := suite.backend.clientCtx.Client.(*mocks.Client)
+				query := fmt.Sprintf("%s.%s='%s'", evmtypes.TypeMsgEthereumTx, evmtypes.AttributeKeyEthereumTxHash, txHash.Hex())
+				RegisterTxSearchEmpty(client, query)
+			},
 			&types.Block{Header: types.Header{Height: 1}, Data: types.Data{Txs: []types.Tx{}}},
 			[]*abci.ExecTxResult{
 				{
@@ -206,6 +210,74 @@ func (suite *BackendTestSuite) TestTraceTransaction() {
 			}
 		})
 	}
+}
+
+// TestTraceTransactionEthTxIndex verifies that TraceTransaction correctly traces
+// a transaction that is not the first in a multi-tx block, using EthTxIndex (not
+// TxIndex) as the predecessor-loop bound after the index-domain fix.
+func (suite *BackendTestSuite) TestTraceTransactionEthTxIndex() {
+	suite.SetupTest()
+
+	// Build two signed transactions; hashes computed AFTER signing so they match
+	// what IndexBlock stores.
+	msgFirst, _ := suite.buildEthereumTx()
+	txBzFirst := suite.signAndEncodeEthTx(msgFirst)
+	txHashFirst := msgFirst.AsTransaction().Hash()
+
+	msgTarget, _ := suite.buildEthereumTx()
+	txBzTarget := suite.signAndEncodeEthTx(msgTarget)
+	txHashTarget := msgTarget.AsTransaction().Hash()
+
+	// Block with two Cosmos txs: EthTxIndex == TxIndex == 0 for msgFirst,
+	// EthTxIndex == TxIndex == 1 for msgTarget.
+	localBlock := types.MakeBlock(1, []types.Tx{txBzFirst, txBzTarget}, nil, nil)
+	localBlock.ChainID = ChainID
+
+	responseBlock := []*abci.ExecTxResult{
+		{
+			Code: 0,
+			Events: []abci.Event{{
+				Type: evmtypes.EventTypeEthereumTx,
+				Attributes: []abci.EventAttribute{
+					{Key: evmtypes.AttributeKeyEthereumTxHash, Value: txHashFirst.Hex()},
+					{Key: evmtypes.AttributeKeyTxIndex, Value: "0"},
+					{Key: evmtypes.AttributeKeyTxGasUsed, Value: "21000"},
+				},
+			}},
+		},
+		{
+			Code: 0,
+			Events: []abci.Event{{
+				Type: evmtypes.EventTypeEthereumTx,
+				Attributes: []abci.EventAttribute{
+					{Key: evmtypes.AttributeKeyEthereumTxHash, Value: txHashTarget.Hex()},
+					{Key: evmtypes.AttributeKeyTxIndex, Value: "1"},
+					{Key: evmtypes.AttributeKeyTxGasUsed, Value: "21000"},
+				},
+			}},
+		},
+	}
+
+	db := dbm.NewMemDB()
+	suite.backend.indexer = indexer.NewKVIndexer(db, log.NewNopLogger(), suite.backend.clientCtx)
+	err := suite.backend.indexer.IndexBlock(localBlock, responseBlock)
+	suite.Require().NoError(err)
+
+	queryClient := suite.backend.queryClient.QueryClient.(*mocks.EVMQueryClient)
+	client := suite.backend.clientCtx.Client.(*mocks.Client)
+
+	_, err = RegisterBlockMultipleTxs(client, 1, []types.Tx{txBzFirst, txBzTarget})
+	suite.Require().NoError(err)
+
+	// EthTxIndex=1: the predecessor loop runs once (i=0) and fetches msgFirst
+	// (TxIndex=0, MsgIndex=0). With the Gap-1 fix the message AT MsgIndex is
+	// added directly, so msgFirst is a predecessor of msgTarget.
+	RegisterTraceTransactionWithPredecessors(queryClient, msgTarget, []*evmtypes.MsgEthereumTx{msgFirst})
+	RegisterConsensusParams(client, 1)
+
+	txResult, err := suite.backend.TraceTransaction(txHashTarget, nil)
+	suite.Require().NoError(err)
+	suite.Require().Equal(map[string]interface{}{"test": "hello"}, txResult)
 }
 
 func (suite *BackendTestSuite) TestTraceBlock() {

@@ -66,13 +66,20 @@ func (b *Backend) TraceTransaction(hash common.Hash, config *evmtypes.TraceConfi
 			continue
 		}
 
+		// The after-loop section below handles all predecessors that share the same
+		// Cosmos tx slot as the target (intra-tx ordering by MsgIndex / derived-tx
+		// event order). Skip them here to avoid double-counting.
+		if int(predecessorTx.TxIndex) == int(transaction.TxIndex) {
+			continue
+		}
+
 		if txAdditional != nil {
 			// This is a derived tx, fetch all derived txs from events in this Cosmos tx.
 			// Use predecessorTx.TxIndex (Cosmos slot) — not i (Ethereum index) — when
 			// indexing into block-level arrays.
 			cosmosTxIdx := int(predecessorTx.TxIndex)
 			blockRes, err := b.rpcClient.BlockResults(b.ctx, &blk.Block.Height)
-			if err == nil && cosmosTxIdx < len(blockRes.TxsResults) {
+			if err == nil && blockRes != nil && cosmosTxIdx < len(blockRes.TxsResults) {
 				txResult := blockRes.TxsResults[cosmosTxIdx]
 				cosmosTx, err := b.clientCtx.TxConfig.TxDecoder()(blk.Block.Txs[cosmosTxIdx])
 				if err == nil {
@@ -119,14 +126,13 @@ func (b *Backend) TraceTransaction(hash common.Hash, config *evmtypes.TraceConfi
 			continue
 		}
 
-		index := int(predecessorTx.MsgIndex)
-		for j := 0; j < index; j++ {
-			msg := tx.GetMsgs()[j]
-			// Check if it’s a normal Ethereum tx
-			if ethMsg, ok := msg.(*evmtypes.MsgEthereumTx); ok {
-				predecessors = append(predecessors, ethMsg)
-				continue
-			}
+		// Add the EVM message at this Ethernet index directly. The inner loop used
+		// here previously ran j < MsgIndex, which added only messages BEFORE the
+		// current position and left the message AT MsgIndex itself unhandled —
+		// causing the last message of any multi-message predecessor Cosmos tx to
+		// be silently dropped from the predecessor set.
+		if ethMsg, ok := tx.GetMsgs()[int(predecessorTx.MsgIndex)].(*evmtypes.MsgEthereumTx); ok {
+			predecessors = append(predecessors, ethMsg)
 		}
 	}
 
@@ -152,7 +158,7 @@ func (b *Backend) TraceTransaction(hash common.Hash, config *evmtypes.TraceConfi
 	if additional != nil {
 		// This is a derived tx, fetch all derived txs from events in this Cosmos tx
 		blockRes, err := b.rpcClient.BlockResults(b.ctx, &blk.Block.Height)
-		if err == nil && int(transaction.TxIndex) < len(blockRes.TxsResults) {
+		if err == nil && blockRes != nil && int(transaction.TxIndex) < len(blockRes.TxsResults) {
 			txResult := blockRes.TxsResults[transaction.TxIndex]
 			parsedTxs, err := rpctypes.ParseTxResult(txResult, tx)
 			if err == nil {
