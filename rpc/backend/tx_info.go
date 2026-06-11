@@ -411,6 +411,54 @@ func (b *Backend) GetTransactionByBlockNumberAndIndex(blockNum rpctypes.BlockNum
 	return b.GetTransactionByBlockAndIndex(block, idx)
 }
 
+// derivedTxAdditionalFields rebuilds the TxResultAdditionalFields for a tx located via
+// the KV indexer when (and only when) that tx is a derived EVM tx — an internal execution
+// recorded only as events, with no embedded MsgEthereumTx to decode. The KV indexer stores
+// just the TxResult, so without this the serving paths (GetTransactionByHash / Receipt /
+// TraceTransaction) would treat a derived tx as standard and panic on the MsgEthereumTx
+// cast. Standard txs return (nil, nil); the IsDerivedTx marker gate keeps their lookups
+// cheap (one key read, no event reparse).
+func (b *Backend) derivedTxAdditionalFields(hash common.Hash, res *types.TxResult) (*rpctypes.TxResultAdditionalFields, error) {
+	derived, err := b.indexer.IsDerivedTx(hash)
+	if err != nil {
+		return nil, err
+	}
+	if !derived {
+		return nil, nil
+	}
+
+	blockRes, err := b.rpcClient.BlockResults(b.ctx, &res.Height)
+	if err != nil {
+		return nil, errorsmod.Wrapf(err, "block results for derived tx at height %d", res.Height)
+	}
+	if int(res.TxIndex) >= len(blockRes.TxsResults) {
+		return nil, fmt.Errorf("derived tx index %d out of bounds at height %d", res.TxIndex, res.Height)
+	}
+
+	parsedTxs, err := rpctypes.ParseTxResult(blockRes.TxsResults[res.TxIndex], nil)
+	if err != nil {
+		return nil, errorsmod.Wrapf(err, "parse derived tx events at height %d", res.Height)
+	}
+	parsed := parsedTxs.GetTxByMsgIndex(int(res.MsgIndex))
+	if parsed == nil || parsed.Type != evmtypes.DerivedTxType {
+		return nil, fmt.Errorf("derived tx not found in events: height %d, txIndex %d, msgIndex %d",
+			res.Height, res.TxIndex, res.MsgIndex)
+	}
+
+	return &rpctypes.TxResultAdditionalFields{
+		Value:     parsed.Amount,
+		Hash:      parsed.Hash,
+		TxHash:    parsed.TxHash,
+		Type:      parsed.Type,
+		Recipient: parsed.Recipient,
+		Sender:    parsed.Sender,
+		GasUsed:   parsed.GasUsed,
+		Data:      parsed.Data,
+		Nonce:     parsed.Nonce,
+		GasLimit:  &parsed.GasLimit,
+	}, nil
+}
+
 // GetTxByEthHash uses `/tx_query` to find transaction by ethereum tx hash
 // TODO: Don't need to convert once hashing is fixed on Tendermint
 // https://github.com/cometbft/cometbft/issues/6539
@@ -420,7 +468,11 @@ func (b *Backend) GetTxByEthHash(hash common.Hash) (*types.TxResult, *rpctypes.T
 		if err != nil {
 			return nil, nil, err
 		}
-		return txRes, nil, nil
+		additional, err := b.derivedTxAdditionalFields(hash, txRes)
+		if err != nil {
+			return nil, nil, err
+		}
+		return txRes, additional, nil
 	}
 
 	// fallback to tendermint tx indexer
@@ -440,7 +492,11 @@ func (b *Backend) GetTxByEthHashAndMsgIndex(hash common.Hash, index int) (*types
 		if err != nil {
 			return nil, nil, err
 		}
-		return txRes, nil, nil
+		additional, err := b.derivedTxAdditionalFields(hash, txRes)
+		if err != nil {
+			return nil, nil, err
+		}
+		return txRes, additional, nil
 	}
 
 	// fallback to tendermint tx indexer
