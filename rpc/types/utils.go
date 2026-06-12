@@ -175,10 +175,20 @@ func NewRPCTransactionFromIncompleteMsg(
 ) (*RPCTransaction, error) {
 	to := &common.Address{}
 	*to = txAdditional.Recipient
+
+	// The JSON-RPC `gas` field is the transaction gas limit (consistent with standard txs
+	// and the Ethereum spec); actual consumption is reported separately as the receipt
+	// `gasUsed`. Fall back to GasUsed only for legacy derived txs that emitted no
+	// txGasLimit attribute.
+	gas := txAdditional.GasUsed
+	if txAdditional.GasLimit != nil && *txAdditional.GasLimit > 0 {
+		gas = *txAdditional.GasLimit
+	}
+
 	result := &RPCTransaction{
 		Type:     hexutil.Uint64(txAdditional.Type),
 		From:     common.HexToAddress(msg.From),
-		Gas:      hexutil.Uint64(txAdditional.GasUsed),
+		Gas:      hexutil.Uint64(gas),
 		GasPrice: (*hexutil.Big)(baseFee),
 		Hash:     common.HexToHash(msg.Hash),
 		Input:    txAdditional.Data,
