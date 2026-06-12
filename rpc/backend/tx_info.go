@@ -411,6 +411,62 @@ func (b *Backend) GetTransactionByBlockNumberAndIndex(blockNum rpctypes.BlockNum
 	return b.GetTransactionByBlockAndIndex(block, idx)
 }
 
+// derivedTxAdditionalFields rebuilds the TxResultAdditionalFields for a tx located via
+// the KV indexer when (and only when) that tx is a derived EVM tx — an internal execution
+// recorded only as events, with no embedded MsgEthereumTx to decode. The KV indexer stores
+// just the TxResult, so without this the serving paths (GetTransactionByHash / Receipt /
+// TraceTransaction) would treat a derived tx as standard and panic on the MsgEthereumTx
+// cast. Standard txs return (nil, nil); the IsDerivedTx marker gate keeps their lookups
+// cheap (one key read, no event reparse).
+func (b *Backend) derivedTxAdditionalFields(hash common.Hash, res *types.TxResult) (*rpctypes.TxResultAdditionalFields, error) {
+	derived, err := b.indexer.IsDerivedTx(hash)
+	if err != nil {
+		return nil, err
+	}
+	if !derived {
+		return nil, nil
+	}
+	return b.buildDerivedAdditional(res)
+}
+
+// buildDerivedAdditional re-parses the block events for res's Cosmos tx and rebuilds the
+// TxResultAdditionalFields for the derived EVM tx at res.MsgIndex. Callers must have
+// already confirmed the entry is derived via a marker (IsDerivedTx for the by-hash path,
+// IsDerivedTxByBlockAndIndex for the by-block-index path), so a missing or non-derived
+// parse result is treated as an error.
+func (b *Backend) buildDerivedAdditional(res *types.TxResult) (*rpctypes.TxResultAdditionalFields, error) {
+	blockRes, err := b.rpcClient.BlockResults(b.ctx, &res.Height)
+	if err != nil {
+		return nil, errorsmod.Wrapf(err, "block results for derived tx at height %d", res.Height)
+	}
+	if int(res.TxIndex) >= len(blockRes.TxsResults) {
+		return nil, fmt.Errorf("derived tx index %d out of bounds at height %d", res.TxIndex, res.Height)
+	}
+
+	parsedTxs, err := rpctypes.ParseTxResult(blockRes.TxsResults[res.TxIndex], nil)
+	if err != nil {
+		return nil, errorsmod.Wrapf(err, "parse derived tx events at height %d", res.Height)
+	}
+	parsed := parsedTxs.GetTxByMsgIndex(int(res.MsgIndex))
+	if parsed == nil || parsed.Type != evmtypes.DerivedTxType {
+		return nil, fmt.Errorf("derived tx not found in events: height %d, txIndex %d, msgIndex %d",
+			res.Height, res.TxIndex, res.MsgIndex)
+	}
+
+	return &rpctypes.TxResultAdditionalFields{
+		Value:     parsed.Amount,
+		Hash:      parsed.Hash,
+		TxHash:    parsed.TxHash,
+		Type:      parsed.Type,
+		Recipient: parsed.Recipient,
+		Sender:    parsed.Sender,
+		GasUsed:   parsed.GasUsed,
+		Data:      parsed.Data,
+		Nonce:     parsed.Nonce,
+		GasLimit:  &parsed.GasLimit,
+	}, nil
+}
+
 // GetTxByEthHash uses `/tx_query` to find transaction by ethereum tx hash
 // TODO: Don't need to convert once hashing is fixed on Tendermint
 // https://github.com/cometbft/cometbft/issues/6539
@@ -418,9 +474,14 @@ func (b *Backend) GetTxByEthHash(hash common.Hash) (*types.TxResult, *rpctypes.T
 	if b.indexer != nil {
 		txRes, err := b.indexer.GetByTxHash(hash)
 		if err == nil {
-			return txRes, nil, nil
+			// indexer hit: rebuild additional fields when this is a derived tx
+			additional, derr := b.derivedTxAdditionalFields(hash, txRes)
+			if derr != nil {
+				return nil, nil, derr
+			}
+			return txRes, additional, nil
 		}
-		// indexer miss or no derived-tx metadata — fall through to event-query reconstruction
+		// indexer miss — fall through to event-query (tx_search) reconstruction
 	}
 
 	// fallback to tendermint tx indexer
@@ -438,9 +499,14 @@ func (b *Backend) GetTxByEthHashAndMsgIndex(hash common.Hash, index int) (*types
 	if b.indexer != nil {
 		txRes, err := b.indexer.GetByTxHash(hash)
 		if err == nil {
-			return txRes, nil, nil
+			// indexer hit: rebuild additional fields when this is a derived tx
+			additional, derr := b.derivedTxAdditionalFields(hash, txRes)
+			if derr != nil {
+				return nil, nil, derr
+			}
+			return txRes, additional, nil
 		}
-		// indexer miss or no derived-tx metadata — fall through to event-query reconstruction
+		// indexer miss — fall through to event-query (tx_search) reconstruction
 	}
 
 	// fallback to tendermint tx indexer
@@ -460,6 +526,21 @@ func (b *Backend) GetTxByTxIndex(height int64, index uint) (*types.TxResult, *rp
 	if b.indexer != nil {
 		txRes, err := b.indexer.GetByBlockAndIndex(height, int32Index)
 		if err == nil {
+			// Only derived block-index entries need their additional fields rebuilt (so
+			// trace predecessors reconstruct them instead of treating them as standard).
+			// The marker gate keeps ordinary txs cheap — no event reparse, matching the
+			// prior behavior — so a standard predecessor never triggers a BlockResults read.
+			derived, derr := b.indexer.IsDerivedTxByBlockAndIndex(height, int32Index)
+			if derr != nil {
+				return nil, nil, derr
+			}
+			if derived {
+				additional, aerr := b.buildDerivedAdditional(txRes)
+				if aerr != nil {
+					return nil, nil, aerr
+				}
+				return txRes, additional, nil
+			}
 			return txRes, nil, nil
 		}
 	}
