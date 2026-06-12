@@ -202,7 +202,8 @@ func (suite *BackendTestSuite) TestGetTransactionByHashDerived() {
 	suite.Require().NotNil(rpcTx.To)
 	suite.Require().Equal(recipient, *rpcTx.To)
 	suite.Require().Equal(hexutil.Uint64(7), rpcTx.Nonce)
-	suite.Require().Equal(hexutil.Uint64(50000), rpcTx.Gas)
+	// gas is the tx gas limit (txGasLimit=60000), not gasUsed — F-2026-17752
+	suite.Require().Equal(hexutil.Uint64(60000), rpcTx.Gas)
 	suite.Require().Equal(big.NewInt(1000), (*big.Int)(rpcTx.Value))
 }
 
