@@ -19,4 +19,6 @@ type EVMTxIndexer interface {
 	GetByBlockAndIndex(int64, int32) (*TxResult, error)
 	// IsDerivedTx reports whether the hash was indexed as a derived (event-only) EVM tx.
 	IsDerivedTx(common.Hash) (bool, error)
+	// IsDerivedTxByBlockAndIndex reports whether the tx at (height, eth tx index) is derived.
+	IsDerivedTxByBlockAndIndex(int64, int32) (bool, error)
 }

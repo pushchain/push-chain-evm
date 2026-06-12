@@ -623,6 +623,69 @@ func (suite *BackendTestSuite) TestGetTransactionByTxIndex() {
 	}
 }
 
+// TestGetTxByTxIndexDerived verifies the block-index lookup reconstructs a derived tx's
+// additional fields on a KV-indexer hit — consistent with the by-hash lookup — so trace
+// predecessors that are derived txs are rebuilt instead of silently dropped.
+func (suite *BackendTestSuite) TestGetTxByTxIndexDerived() {
+	carrierMsg := &banktypes.MsgSend{FromAddress: suite.acc.String(), ToAddress: suite.acc.String()}
+	builder := suite.backend.clientCtx.TxConfig.NewTxBuilder()
+	suite.Require().NoError(builder.SetMsgs(carrierMsg))
+	carrierBz, err := suite.backend.clientCtx.TxConfig.TxEncoder()(builder.GetTx())
+	suite.Require().NoError(err)
+
+	derivedHash := common.HexToHash("0x00000000000000000000000000000000000000000000000000000000deadf00d")
+	sender := common.BytesToAddress([]byte("derived-sender"))
+	recipient := common.BytesToAddress([]byte("derived-recipient"))
+
+	block := &types.Block{Header: types.Header{Height: 1, ChainID: "test"}, Data: types.Data{Txs: []types.Tx{carrierBz}}}
+	responseDeliver := []*abci.ExecTxResult{
+		{
+			Code:    0,
+			GasUsed: 50000,
+			Events: []abci.Event{
+				{Type: evmtypes.EventTypeEthereumTx, Attributes: []abci.EventAttribute{
+					{Key: "ethereumTxHash", Value: derivedHash.Hex()},
+					{Key: "txIndex", Value: "0"},
+					{Key: "amount", Value: "1000"},
+					{Key: "txGasUsed", Value: "50000"},
+					{Key: "recipient", Value: recipient.Hex()},
+					{Key: "txNonce", Value: "7"},
+					{Key: "txGasLimit", Value: "60000"},
+					{Key: "txData", Value: "0x"},
+				}},
+				{Type: evmtypes.EventTypeTxLog, Attributes: []abci.EventAttribute{}},
+				{Type: "message", Attributes: []abci.EventAttribute{
+					{Key: "module", Value: "evm"},
+					{Key: "sender", Value: sender.Hex()},
+					{Key: "txType", Value: "99"}, // evmtypes.DerivedTxType
+				}},
+			},
+		},
+	}
+
+	client := suite.backend.clientCtx.Client.(*mocks.Client)
+	_, err = RegisterBlockResultsWithTxResults(client, 1, responseDeliver)
+	suite.Require().NoError(err)
+
+	db := dbm.NewMemDB()
+	suite.backend.indexer = indexer.NewKVIndexer(db, log.NewNopLogger(), suite.backend.clientCtx)
+	suite.Require().NoError(suite.backend.indexer.IndexBlock(block, responseDeliver))
+
+	// derived tx is at eth block-index 0
+	txRes, additional, err := suite.backend.GetTxByTxIndex(1, 0)
+	suite.Require().NoError(err)
+	suite.Require().NotNil(txRes)
+	suite.Require().Equal(int32(0), txRes.EthTxIndex)
+
+	// the block-index lookup must rebuild the derived tx's additional fields (was nil before)
+	suite.Require().NotNil(additional)
+	suite.Require().Equal(derivedHash, additional.Hash)
+	suite.Require().Equal(recipient, additional.Recipient)
+	suite.Require().Equal(sender, additional.Sender)
+	suite.Require().Equal(uint64(7), additional.Nonce)
+	suite.Require().Equal(uint64(50000), additional.GasUsed)
+}
+
 func (suite *BackendTestSuite) TestQueryTendermintTxIndexer() {
 	testCases := []struct {
 		name         string

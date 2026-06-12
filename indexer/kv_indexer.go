@@ -243,6 +243,21 @@ func (kv *KVIndexer) GetByBlockAndIndex(blockNumber int64, txIndex int32) (*cosm
 	return kv.GetByTxHash(common.BytesToHash(bz))
 }
 
+// IsDerivedTxByBlockAndIndex reports whether the tx at (blockNumber, eth tx index) is a
+// derived EVM tx. It resolves the hash from the block-index entry and consults the derived
+// marker — two cheap key reads — so the RPC backend can gate derived-tx reconstruction on
+// the block-index path without reparsing block events for ordinary txs.
+func (kv *KVIndexer) IsDerivedTxByBlockAndIndex(blockNumber int64, txIndex int32) (bool, error) {
+	bz, err := kv.db.Get(TxIndexKey(blockNumber, txIndex))
+	if err != nil {
+		return false, errorsmod.Wrapf(err, "IsDerivedTxByBlockAndIndex %d %d", blockNumber, txIndex)
+	}
+	if len(bz) == 0 {
+		return false, nil
+	}
+	return kv.IsDerivedTx(common.BytesToHash(bz))
+}
+
 // TxHashKey returns the key for db entry: `tx hash -> tx result struct`
 func TxHashKey(hash common.Hash) []byte {
 	return append([]byte{KeyPrefixTxHash}, hash.Bytes()...)

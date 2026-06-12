@@ -426,7 +426,15 @@ func (b *Backend) derivedTxAdditionalFields(hash common.Hash, res *types.TxResul
 	if !derived {
 		return nil, nil
 	}
+	return b.buildDerivedAdditional(res)
+}
 
+// buildDerivedAdditional re-parses the block events for res's Cosmos tx and rebuilds the
+// TxResultAdditionalFields for the derived EVM tx at res.MsgIndex. Callers must have
+// already confirmed the entry is derived via a marker (IsDerivedTx for the by-hash path,
+// IsDerivedTxByBlockAndIndex for the by-block-index path), so a missing or non-derived
+// parse result is treated as an error.
+func (b *Backend) buildDerivedAdditional(res *types.TxResult) (*rpctypes.TxResultAdditionalFields, error) {
 	blockRes, err := b.rpcClient.BlockResults(b.ctx, &res.Height)
 	if err != nil {
 		return nil, errorsmod.Wrapf(err, "block results for derived tx at height %d", res.Height)
@@ -518,6 +526,21 @@ func (b *Backend) GetTxByTxIndex(height int64, index uint) (*types.TxResult, *rp
 	if b.indexer != nil {
 		txRes, err := b.indexer.GetByBlockAndIndex(height, int32Index)
 		if err == nil {
+			// Only derived block-index entries need their additional fields rebuilt (so
+			// trace predecessors reconstruct them instead of treating them as standard).
+			// The marker gate keeps ordinary txs cheap — no event reparse, matching the
+			// prior behavior — so a standard predecessor never triggers a BlockResults read.
+			derived, derr := b.indexer.IsDerivedTxByBlockAndIndex(height, int32Index)
+			if derr != nil {
+				return nil, nil, derr
+			}
+			if derived {
+				additional, aerr := b.buildDerivedAdditional(txRes)
+				if aerr != nil {
+					return nil, nil, aerr
+				}
+				return txRes, additional, nil
+			}
 			return txRes, nil, nil
 		}
 	}
