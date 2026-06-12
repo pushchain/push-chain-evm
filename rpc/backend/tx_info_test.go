@@ -14,6 +14,7 @@ import (
 	"github.com/cometbft/cometbft/types"
 
 	dbm "github.com/cosmos/cosmos-db"
+	banktypes "github.com/cosmos/cosmos-sdk/x/bank/types"
 	"github.com/cosmos/evm/indexer"
 	"github.com/cosmos/evm/rpc/backend/mocks"
 	rpctypes "github.com/cosmos/evm/rpc/types"
@@ -131,6 +132,80 @@ func (suite *BackendTestSuite) TestGetTransactionByHash() {
 	}
 }
 
+// TestGetTransactionByHashDerived verifies that a derived EVM tx (event-only, no embedded
+// MsgEthereumTx) indexed in the KV indexer is served by eth_getTransactionByHash. The
+// backend must rebuild the tx's additional fields from block events rather than casting
+// the carrier Cosmos message to *MsgEthereumTx — which, before the fix, would panic.
+func (suite *BackendTestSuite) TestGetTransactionByHashDerived() {
+	// Carrier is a non-eth Cosmos message (a bank MsgSend, standing in for e.g. a
+	// Universal Executor MsgExecutePayload): no ethereum extension option, so the indexer
+	// takes the derived path, and casting it to *MsgEthereumTx is exactly what panics
+	// without the reconstruction fix. The derived EVM execution lives in the events.
+	carrierMsg := &banktypes.MsgSend{FromAddress: suite.acc.String(), ToAddress: suite.acc.String()}
+	builder := suite.backend.clientCtx.TxConfig.NewTxBuilder()
+	suite.Require().NoError(builder.SetMsgs(carrierMsg))
+	carrierBz, err := suite.backend.clientCtx.TxConfig.TxEncoder()(builder.GetTx())
+	suite.Require().NoError(err)
+
+	derivedHash := common.HexToHash("0x00000000000000000000000000000000000000000000000000000000deadbeef")
+	sender := common.BytesToAddress([]byte("derived-sender"))
+	recipient := common.BytesToAddress([]byte("derived-recipient"))
+
+	block := &types.Block{Header: types.Header{Height: 1, ChainID: "test"}, Data: types.Data{Txs: []types.Tx{carrierBz}}}
+	responseDeliver := []*abci.ExecTxResult{
+		{
+			Code:    0,
+			GasUsed: 50000,
+			Events: []abci.Event{
+				{Type: evmtypes.EventTypeEthereumTx, Attributes: []abci.EventAttribute{
+					{Key: "ethereumTxHash", Value: derivedHash.Hex()},
+					{Key: "txIndex", Value: "0"},
+					{Key: "amount", Value: "1000"},
+					{Key: "txGasUsed", Value: "50000"},
+					{Key: "recipient", Value: recipient.Hex()},
+					{Key: "txNonce", Value: "7"},
+					{Key: "txGasLimit", Value: "60000"},
+					{Key: "txData", Value: "0x"},
+				}},
+				{Type: evmtypes.EventTypeTxLog, Attributes: []abci.EventAttribute{}},
+				{Type: "message", Attributes: []abci.EventAttribute{
+					{Key: "module", Value: "evm"},
+					{Key: "sender", Value: sender.Hex()},
+					{Key: "txType", Value: "99"}, // evmtypes.DerivedTxType
+				}},
+			},
+		},
+	}
+
+	client := suite.backend.clientCtx.Client.(*mocks.Client)
+	queryClient := suite.backend.queryClient.QueryClient.(*mocks.EVMQueryClient)
+	_, err = RegisterBlock(client, 1, carrierBz)
+	suite.Require().NoError(err)
+	_, err = RegisterBlockResultsWithTxResults(client, 1, responseDeliver)
+	suite.Require().NoError(err)
+	RegisterBaseFee(queryClient, math.NewInt(1))
+
+	db := dbm.NewMemDB()
+	suite.backend.indexer = indexer.NewKVIndexer(db, log.NewNopLogger(), suite.backend.clientCtx)
+	suite.Require().NoError(suite.backend.indexer.IndexBlock(block, responseDeliver))
+
+	isDerived, err := suite.backend.indexer.IsDerivedTx(derivedHash)
+	suite.Require().NoError(err)
+	suite.Require().True(isDerived)
+
+	// Must not panic and must return the tx rebuilt from events.
+	rpcTx, err := suite.backend.GetTransactionByHash(derivedHash)
+	suite.Require().NoError(err)
+	suite.Require().NotNil(rpcTx)
+	suite.Require().Equal(derivedHash, rpcTx.Hash)
+	suite.Require().Equal(sender, rpcTx.From)
+	suite.Require().NotNil(rpcTx.To)
+	suite.Require().Equal(recipient, *rpcTx.To)
+	suite.Require().Equal(hexutil.Uint64(7), rpcTx.Nonce)
+	suite.Require().Equal(hexutil.Uint64(50000), rpcTx.Gas)
+	suite.Require().Equal(big.NewInt(1000), (*big.Int)(rpcTx.Value))
+}
+
 func (suite *BackendTestSuite) TestGetTransactionsByHashPending() {
 	msgEthereumTx, bz := suite.buildEthereumTx()
 	rpcTransaction, _ := rpctypes.NewRPCTransaction(msgEthereumTx.AsTransaction(), common.Hash{}, 0, 0, big.NewInt(1), suite.backend.chainID)
@@ -231,6 +306,47 @@ func (suite *BackendTestSuite) TestGetTxByEthHash() {
 			}
 		})
 	}
+}
+
+// TestGetTxByEthHashFallsThroughOnIndexerMiss is a regression test for F-2026-17740.
+// When the KV indexer is enabled but misses a hash (e.g. a derived tx that the indexer
+// never recorded), GetTxByEthHash must fall through to the CometBFT tx_search
+// reconstruction instead of returning the indexer's not-found error. Before the fix the
+// function short-circuited on the indexer error and never queried tx_search.
+func (suite *BackendTestSuite) TestGetTxByEthHashFallsThroughOnIndexerMiss() {
+	msgEthereumTx, bz := suite.buildEthereumTx()
+	hash := common.HexToHash(msgEthereumTx.Hash)
+
+	suite.SetupTest()
+	// Enabled but empty indexer -> GetByTxHash returns a miss.
+	suite.backend.indexer = indexer.NewKVIndexer(dbm.NewMemDB(), log.NewNopLogger(), suite.backend.clientCtx)
+
+	client := suite.backend.clientCtx.Client.(*mocks.Client)
+	query := fmt.Sprintf("%s.%s='%s'", evmtypes.TypeMsgEthereumTx, evmtypes.AttributeKeyEthereumTxHash, hash.Hex())
+	RegisterTxSearch(client, query, bz)
+
+	_, _, _ = suite.backend.GetTxByEthHash(hash)
+
+	// The fallback (tx_search) must have been reached on the indexer miss.
+	client.AssertNumberOfCalls(suite.T(), "TxSearch", 1)
+}
+
+// TestGetTxByEthHashAndMsgIndexFallsThroughOnIndexerMiss is the F-2026-17740 regression
+// test for the msg-index variant: an indexer miss must also fall through to tx_search.
+func (suite *BackendTestSuite) TestGetTxByEthHashAndMsgIndexFallsThroughOnIndexerMiss() {
+	msgEthereumTx, bz := suite.buildEthereumTx()
+	hash := common.HexToHash(msgEthereumTx.Hash)
+
+	suite.SetupTest()
+	suite.backend.indexer = indexer.NewKVIndexer(dbm.NewMemDB(), log.NewNopLogger(), suite.backend.clientCtx)
+
+	client := suite.backend.clientCtx.Client.(*mocks.Client)
+	query := fmt.Sprintf("%s.%s='%s'", evmtypes.TypeMsgEthereumTx, evmtypes.AttributeKeyEthereumTxHash, hash.Hex())
+	RegisterTxSearch(client, query, bz)
+
+	_, _, _ = suite.backend.GetTxByEthHashAndMsgIndex(hash, 0)
+
+	client.AssertNumberOfCalls(suite.T(), "TxSearch", 1)
 }
 
 func (suite *BackendTestSuite) TestGetTransactionByBlockHashAndIndex() {
@@ -507,6 +623,69 @@ func (suite *BackendTestSuite) TestGetTransactionByTxIndex() {
 	}
 }
 
+// TestGetTxByTxIndexDerived verifies the block-index lookup reconstructs a derived tx's
+// additional fields on a KV-indexer hit — consistent with the by-hash lookup — so trace
+// predecessors that are derived txs are rebuilt instead of silently dropped.
+func (suite *BackendTestSuite) TestGetTxByTxIndexDerived() {
+	carrierMsg := &banktypes.MsgSend{FromAddress: suite.acc.String(), ToAddress: suite.acc.String()}
+	builder := suite.backend.clientCtx.TxConfig.NewTxBuilder()
+	suite.Require().NoError(builder.SetMsgs(carrierMsg))
+	carrierBz, err := suite.backend.clientCtx.TxConfig.TxEncoder()(builder.GetTx())
+	suite.Require().NoError(err)
+
+	derivedHash := common.HexToHash("0x00000000000000000000000000000000000000000000000000000000deadf00d")
+	sender := common.BytesToAddress([]byte("derived-sender"))
+	recipient := common.BytesToAddress([]byte("derived-recipient"))
+
+	block := &types.Block{Header: types.Header{Height: 1, ChainID: "test"}, Data: types.Data{Txs: []types.Tx{carrierBz}}}
+	responseDeliver := []*abci.ExecTxResult{
+		{
+			Code:    0,
+			GasUsed: 50000,
+			Events: []abci.Event{
+				{Type: evmtypes.EventTypeEthereumTx, Attributes: []abci.EventAttribute{
+					{Key: "ethereumTxHash", Value: derivedHash.Hex()},
+					{Key: "txIndex", Value: "0"},
+					{Key: "amount", Value: "1000"},
+					{Key: "txGasUsed", Value: "50000"},
+					{Key: "recipient", Value: recipient.Hex()},
+					{Key: "txNonce", Value: "7"},
+					{Key: "txGasLimit", Value: "60000"},
+					{Key: "txData", Value: "0x"},
+				}},
+				{Type: evmtypes.EventTypeTxLog, Attributes: []abci.EventAttribute{}},
+				{Type: "message", Attributes: []abci.EventAttribute{
+					{Key: "module", Value: "evm"},
+					{Key: "sender", Value: sender.Hex()},
+					{Key: "txType", Value: "99"}, // evmtypes.DerivedTxType
+				}},
+			},
+		},
+	}
+
+	client := suite.backend.clientCtx.Client.(*mocks.Client)
+	_, err = RegisterBlockResultsWithTxResults(client, 1, responseDeliver)
+	suite.Require().NoError(err)
+
+	db := dbm.NewMemDB()
+	suite.backend.indexer = indexer.NewKVIndexer(db, log.NewNopLogger(), suite.backend.clientCtx)
+	suite.Require().NoError(suite.backend.indexer.IndexBlock(block, responseDeliver))
+
+	// derived tx is at eth block-index 0
+	txRes, additional, err := suite.backend.GetTxByTxIndex(1, 0)
+	suite.Require().NoError(err)
+	suite.Require().NotNil(txRes)
+	suite.Require().Equal(int32(0), txRes.EthTxIndex)
+
+	// the block-index lookup must rebuild the derived tx's additional fields (was nil before)
+	suite.Require().NotNil(additional)
+	suite.Require().Equal(derivedHash, additional.Hash)
+	suite.Require().Equal(recipient, additional.Recipient)
+	suite.Require().Equal(sender, additional.Sender)
+	suite.Require().Equal(uint64(7), additional.Nonce)
+	suite.Require().Equal(uint64(50000), additional.GasUsed)
+}
+
 func (suite *BackendTestSuite) TestQueryTendermintTxIndexer() {
 	testCases := []struct {
 		name         string
@@ -616,6 +795,70 @@ func (suite *BackendTestSuite) TestGetTransactionReceipt() {
 			}
 		})
 	}
+}
+
+// TestGetTransactionReceiptDerived verifies eth_getTransactionReceipt for a KV-indexed
+// derived tx: the receipt path must rebuild the tx from events (additional fields) rather
+// than casting the carrier Cosmos message — which, before the fix, would panic.
+func (suite *BackendTestSuite) TestGetTransactionReceiptDerived() {
+	carrierMsg := &banktypes.MsgSend{FromAddress: suite.acc.String(), ToAddress: suite.acc.String()}
+	builder := suite.backend.clientCtx.TxConfig.NewTxBuilder()
+	suite.Require().NoError(builder.SetMsgs(carrierMsg))
+	carrierBz, err := suite.backend.clientCtx.TxConfig.TxEncoder()(builder.GetTx())
+	suite.Require().NoError(err)
+
+	derivedHash := common.HexToHash("0x00000000000000000000000000000000000000000000000000000000deadcafe")
+	sender := common.BytesToAddress([]byte("derived-sender"))
+	recipient := common.BytesToAddress([]byte("derived-recipient"))
+
+	block := &types.Block{Header: types.Header{Height: 1, ChainID: "test"}, Data: types.Data{Txs: []types.Tx{carrierBz}}}
+	responseDeliver := []*abci.ExecTxResult{
+		{
+			Code:    0,
+			GasUsed: 50000,
+			Events: []abci.Event{
+				{Type: evmtypes.EventTypeEthereumTx, Attributes: []abci.EventAttribute{
+					{Key: "ethereumTxHash", Value: derivedHash.Hex()},
+					{Key: "txIndex", Value: "0"},
+					{Key: "amount", Value: "1000"},
+					{Key: "txGasUsed", Value: "50000"},
+					{Key: "recipient", Value: recipient.Hex()},
+					{Key: "txNonce", Value: "7"},
+					{Key: "txGasLimit", Value: "60000"},
+					{Key: "txData", Value: "0x"},
+				}},
+				{Type: evmtypes.EventTypeTxLog, Attributes: []abci.EventAttribute{}},
+				{Type: "message", Attributes: []abci.EventAttribute{
+					{Key: "module", Value: "evm"},
+					{Key: "sender", Value: sender.Hex()},
+					{Key: "txType", Value: "99"}, // evmtypes.DerivedTxType
+				}},
+			},
+		},
+	}
+
+	client := suite.backend.clientCtx.Client.(*mocks.Client)
+	queryClient := suite.backend.queryClient.QueryClient.(*mocks.EVMQueryClient)
+	_, err = RegisterBlock(client, 1, carrierBz)
+	suite.Require().NoError(err)
+	_, err = RegisterBlockResultsWithTxResults(client, 1, responseDeliver)
+	suite.Require().NoError(err)
+	RegisterBaseFee(queryClient, math.NewInt(1))
+
+	db := dbm.NewMemDB()
+	suite.backend.indexer = indexer.NewKVIndexer(db, log.NewNopLogger(), suite.backend.clientCtx)
+	suite.Require().NoError(suite.backend.indexer.IndexBlock(block, responseDeliver))
+
+	// Must not panic and must return a receipt rebuilt from events.
+	receipt, err := suite.backend.GetTransactionReceipt(derivedHash)
+	suite.Require().NoError(err)
+	suite.Require().NotNil(receipt)
+	suite.Require().Equal(derivedHash, receipt["transactionHash"])
+	suite.Require().Equal(hexutil.Uint(ethtypes.ReceiptStatusSuccessful), receipt["status"])
+	suite.Require().Equal(sender, receipt["from"])
+	suite.Require().Equal(hexutil.Uint64(50000), receipt["gasUsed"])
+	suite.Require().NotNil(receipt["to"])
+	suite.Require().Equal(recipient, *receipt["to"].(*common.Address))
 }
 
 func (suite *BackendTestSuite) TestGetGasUsed() {
