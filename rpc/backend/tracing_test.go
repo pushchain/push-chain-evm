@@ -61,7 +61,14 @@ func (suite *BackendTestSuite) TestTraceTransaction() {
 	}{
 		{
 			"fail - tx not found",
-			func() {},
+			func() {
+				// On an indexer miss GetTxByEthHash falls through to tx_search; mock it
+				// empty so the lookup resolves to a clean "not found" error instead of an
+				// unexpected mock call.
+				client := suite.backend.clientCtx.Client.(*mocks.Client)
+				query := fmt.Sprintf("%s.%s='%s'", evmtypes.TypeMsgEthereumTx, evmtypes.AttributeKeyEthereumTxHash, txHash.Hex())
+				RegisterTxSearchEmpty(client, query)
+			},
 			&types.Block{Header: types.Header{Height: 1}, Data: types.Data{Txs: []types.Tx{}}},
 			[]*abci.ExecTxResult{
 				{
