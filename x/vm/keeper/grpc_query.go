@@ -752,9 +752,18 @@ func (k *Keeper) traceTx(
 	traceConfig *types.TraceConfig,
 	commitMessage bool,
 ) (*any, uint, error) {
-	msg, err := core.TransactionToMessage(tx, signer, cfg.BaseFee)
-	if err != nil {
-		return nil, 0, status.Error(codes.Internal, err.Error())
+	// Derived txs are unsigned (V=R=S=0) and cannot be recovered via the signer.
+	// Use the pre-populated from address directly, same as the predecessor loop.
+	var msg *core.Message
+	if isUnsigned(tx) {
+		m := unsignedTxAsMessage(from, tx, cfg.BaseFee)
+		msg = &m
+	} else {
+		var err error
+		msg, err = core.TransactionToMessage(tx, signer, cfg.BaseFee)
+		if err != nil {
+			return nil, 0, status.Error(codes.Internal, err.Error())
+		}
 	}
 
 	return k.traceTxWithMsg(ctx, cfg, txConfig, msg, traceConfig, commitMessage)
