@@ -245,6 +245,24 @@ func RegisterBlockResultsWithTxs(
 	return res
 }
 
+// RegisterBlockResultsWithTxResults mocks BlockResults so it returns the supplied
+// per-tx results verbatim. Used to feed derived-tx events (ethereum_tx + message) that
+// the backend reparses to rebuild a derived tx's additional fields.
+func RegisterBlockResultsWithTxResults(
+	client *mocks.Client,
+	height int64,
+	txResults []*abci.ExecTxResult,
+) (*cmtrpctypes.ResultBlockResults, error) {
+	res := &cmtrpctypes.ResultBlockResults{
+		Height:     height,
+		TxsResults: txResults,
+	}
+
+	client.On("BlockResults", rpc.ContextWithHeight(height), mock.AnythingOfType("*int64")).
+		Return(res, nil)
+	return res, nil
+}
+
 func RegisterBlockResultsError(client *mocks.Client, height int64) {
 	client.On("BlockResults", rpc.ContextWithHeight(height), mock.AnythingOfType("*int64")).
 		Return(nil, errortypes.ErrInvalidRequest)
