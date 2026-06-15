@@ -386,6 +386,56 @@ func (b *Backend) GetTxByTxIndex(height int64, index uint) (*servertypes.TxResul
 	return txResult, txAdditional, nil
 }
 
+// derivedTxAdditionalFields rebuilds the TxResultAdditionalFields for a tx located via
+// the KV indexer when (and only when) that tx is a derived EVM tx — an internal execution
+// recorded only as events, with no embedded MsgEthereumTx to decode. Standard txs return
+// (nil, nil); the IsDerivedTx marker keeps their lookups cheap (one key read, no event re-parse).
+func (b *Backend) derivedTxAdditionalFields(hash common.Hash, res *servertypes.TxResult) (*rpctypes.TxResultAdditionalFields, error) {
+	derived, err := b.Indexer.IsDerivedTx(hash)
+	if err != nil {
+		return nil, err
+	}
+	if !derived {
+		return nil, nil
+	}
+	return b.buildDerivedAdditional(res)
+}
+
+// buildDerivedAdditional re-parses the block events for res's Cosmos tx and rebuilds
+// TxResultAdditionalFields for the derived EVM tx at res.MsgIndex.
+func (b *Backend) buildDerivedAdditional(res *servertypes.TxResult) (*rpctypes.TxResultAdditionalFields, error) {
+	blockRes, err := b.RPCClient.BlockResults(b.Ctx, &res.Height)
+	if err != nil {
+		return nil, errorsmod.Wrapf(err, "block results for derived tx at height %d", res.Height)
+	}
+	if int(res.TxIndex) >= len(blockRes.TxsResults) {
+		return nil, fmt.Errorf("derived tx index %d out of bounds at height %d", res.TxIndex, res.Height)
+	}
+
+	parsedTxs, err := rpctypes.ParseTxResult(blockRes.TxsResults[res.TxIndex], nil)
+	if err != nil {
+		return nil, errorsmod.Wrapf(err, "parse derived tx events at height %d", res.Height)
+	}
+	parsed := parsedTxs.GetTxByMsgIndex(int(res.MsgIndex))
+	if parsed == nil || parsed.Type != evmtypes.DerivedTxType {
+		return nil, fmt.Errorf("derived tx not found in events: height %d, txIndex %d, msgIndex %d",
+			res.Height, res.TxIndex, res.MsgIndex)
+	}
+
+	return &rpctypes.TxResultAdditionalFields{
+		Value:     parsed.Amount,
+		Hash:      parsed.Hash,
+		TxHash:    parsed.TxHash,
+		Type:      parsed.Type,
+		Recipient: parsed.Recipient,
+		Sender:    parsed.Sender,
+		GasUsed:   parsed.GasUsed,
+		Data:      parsed.Data,
+		Nonce:     parsed.Nonce,
+		GasLimit:  &parsed.GasLimit,
+	}, nil
+}
+
 // QueryCometTxIndexer query tx in CometBFT tx indexer
 func (b *Backend) QueryCometTxIndexer(
 	query string,
