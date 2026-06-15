@@ -657,3 +657,105 @@ func (suite *BackendTestSuite) TestTraceTransactionDerivedTargetInMultiDerivedCo
 		_, _ = suite.backend.TraceTransaction(hashD2, nil)
 	}, "tracing the 3rd derived EVM tx of a multi-derived Cosmos tx must not panic (F-2026-17754)")
 }
+
+// TestTraceTransactionFirstDerivedTargetInMultiDerivedCosmosTx is the passing boundary to
+// the multi-derived repro: tracing the FIRST derived EVM tx (MsgIndex=0) of a multi-derived
+// Cosmos tx works — the after-loop's standard-message slice runs zero times — and the
+// predecessor set is correctly empty. (The 3rd derived tx of the same Cosmos tx panics.)
+func (suite *BackendTestSuite) TestTraceTransactionFirstDerivedTargetInMultiDerivedCosmosTx() {
+	suite.SetupTest()
+
+	dummyTxBz, err := suite.backend.ClientCtx.TxConfig.TxEncoder()(
+		suite.backend.ClientCtx.TxConfig.NewTxBuilder().GetTx(),
+	)
+	suite.Require().NoError(err)
+
+	sender := common.HexToAddress("0x1234567890abcdef1234567890abcdef12345678")
+	recipient := common.HexToAddress("0xabcdef1234567890abcdef1234567890abcdef12")
+	gasLimit := uint64(50000)
+	hashD0 := common.HexToHash("0xd000000000000000000000000000000000000000000000000000000000000000")
+	hashD1 := common.HexToHash("0xd100000000000000000000000000000000000000000000000000000000000000")
+	hashD2 := common.HexToHash("0xd200000000000000000000000000000000000000000000000000000000000000")
+	derivedEvents := []abci.Event{
+		derivedTxEvt(hashD0.Hex(), 0, sender.Hex(), recipient.Hex(), gasLimit),
+		derivedTxEvt(hashD1.Hex(), 1, sender.Hex(), recipient.Hex(), gasLimit),
+		derivedTxEvt(hashD2.Hex(), 2, sender.Hex(), recipient.Hex(), gasLimit),
+	}
+
+	suite.backend.Indexer = indexer.NewKVIndexer(dbm.NewMemDB(), log.NewNopLogger(), suite.backend.ClientCtx)
+
+	queryClient := suite.mockQueryClient()
+	client := suite.mockClient()
+	_, err = RegisterBlockMultipleTxs(client, 1, []types.Tx{dummyTxBz})
+	suite.Require().NoError(err)
+
+	// GetTxByEthHash(D0): the 3 derived events are in slot 0; D0 is first → MsgIndex=0, EthTxIndex=0.
+	targetQuery := fmt.Sprintf("%s.%s='%s'", evmtypes.TypeMsgEthereumTx, evmtypes.AttributeKeyEthereumTxHash, hashD0.Hex())
+	RegisterTxSearchWithResult(client, targetQuery, 1, 0, nil, derivedEvents)
+	// After-loop derived scan reads BlockResults for slot 0.
+	RegisterBlockResultsWithTxs(client, 1, []*abci.ExecTxResult{{Code: 0, Events: derivedEvents}})
+
+	var captured *evmtypes.QueryTraceTxRequest
+	RegisterTraceTransactionCapture(queryClient, &captured)
+	RegisterConsensusParams(client, 1)
+
+	_, err = suite.backend.TraceTransaction(hashD0, nil)
+	suite.Require().NoError(err)
+	suite.Require().NotNil(captured)
+	suite.Require().Empty(captured.Predecessors, "first derived tx of a Cosmos tx has no predecessors")
+}
+
+// TestTraceTransactionEvmTargetWithMultiDerivedPredecessors verifies a normal EVM target
+// whose predecessors are 3 derived EVM txs emitted by a single earlier Cosmos tx. The
+// (fixed) outer loop must enumerate all three by eth-index; this is the working path that
+// contrasts the broken derived-target after-loop.
+func (suite *BackendTestSuite) TestTraceTransactionEvmTargetWithMultiDerivedPredecessors() {
+	suite.SetupTest()
+
+	dummyTxBz, err := suite.backend.ClientCtx.TxConfig.TxEncoder()(
+		suite.backend.ClientCtx.TxConfig.NewTxBuilder().GetTx(),
+	)
+	suite.Require().NoError(err)
+
+	msgTarget, _ := suite.buildEthereumTx()
+	txBzTarget := suite.signAndEncodeEthTx(msgTarget)
+	hashTarget := msgTarget.AsTransaction().Hash()
+
+	sender := common.HexToAddress("0x1234567890abcdef1234567890abcdef12345678")
+	recipient := common.HexToAddress("0xabcdef1234567890abcdef1234567890abcdef12")
+	gasLimit := uint64(50000)
+	derivedHashes := []common.Hash{
+		common.HexToHash("0xe000000000000000000000000000000000000000000000000000000000000000"),
+		common.HexToHash("0xe100000000000000000000000000000000000000000000000000000000000000"),
+		common.HexToHash("0xe200000000000000000000000000000000000000000000000000000000000000"),
+	}
+
+	suite.backend.Indexer = indexer.NewKVIndexer(dbm.NewMemDB(), log.NewNopLogger(), suite.backend.ClientCtx)
+
+	queryClient := suite.mockQueryClient()
+	client := suite.mockClient()
+	_, err = RegisterBlockMultipleTxs(client, 1, []types.Tx{dummyTxBz, txBzTarget})
+	suite.Require().NoError(err)
+
+	// GetTxByEthHash(target): standard EVM tx at eth-index 3, Cosmos slot 1.
+	targetQuery := fmt.Sprintf("%s.%s='%s'", evmtypes.TypeMsgEthereumTx, evmtypes.AttributeKeyEthereumTxHash, hashTarget.Hex())
+	RegisterTxSearchWithResult(client, targetQuery, 1, 1, txBzTarget, []abci.Event{ethTxEvent(hashTarget.Hex(), "3")})
+
+	// Outer predecessor loop i=0,1,2 → the 3 derived txs (all in Cosmos slot 0).
+	for i, h := range derivedHashes {
+		idxQuery := fmt.Sprintf("tx.height=%d AND %s.%s=%d", 1, evmtypes.TypeMsgEthereumTx, evmtypes.AttributeKeyTxIndex, i)
+		RegisterTxSearchWithResult(client, idxQuery, 1, 0, nil,
+			[]abci.Event{derivedTxEvt(h.Hex(), i, sender.Hex(), recipient.Hex(), gasLimit)})
+	}
+
+	var captured *evmtypes.QueryTraceTxRequest
+	RegisterTraceTransactionCapture(queryClient, &captured)
+	RegisterConsensusParams(client, 1)
+
+	_, err = suite.backend.TraceTransaction(hashTarget, nil)
+	suite.Require().NoError(err)
+	suite.Require().NotNil(captured)
+
+	suite.Require().Len(captured.Predecessors, len(derivedHashes),
+		"all 3 derived txs of the earlier Cosmos tx must be assembled as predecessors")
+}

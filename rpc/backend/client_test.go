@@ -307,3 +307,17 @@ func RegisterTraceTransactionWithPredecessors(queryClient *mocks.EVMQueryClient,
 func RegisterTraceTransaction(queryClient *mocks.EVMQueryClient, msgEthTx *evmtypes.MsgEthereumTx) {
 	RegisterTraceTransactionWithPredecessors(queryClient, msgEthTx, nil)
 }
+
+// RegisterTraceTransactionCapture mocks TraceTx with a fixed payload and captures the
+// request, so a test can assert the predecessor set TraceTransaction actually assembled
+// (the other helpers ignore it via mock.Anything).
+func RegisterTraceTransactionCapture(queryClient *mocks.EVMQueryClient, captured **evmtypes.QueryTraceTxRequest) {
+	data, _ := json.Marshal(map[string]interface{}{"test": "hello"})
+	queryClient.On("TraceTx", rpc.ContextWithHeight(1), mock.Anything).
+		Run(func(args mock.Arguments) {
+			if req, ok := args.Get(1).(*evmtypes.QueryTraceTxRequest); ok {
+				*captured = req
+			}
+		}).
+		Return(&evmtypes.QueryTraceTxResponse{Data: data}, nil)
+}
