@@ -223,6 +223,11 @@ func (b *Backend) GetBlockReceipts(
 		if err != nil {
 			return nil, fmt.Errorf("failed to marshal receipt")
 		}
+		// Same override as GetTransactionReceipt: derived txs have an event-emitted
+		// hash that differs from the reconstructed LegacyTx hash.
+		if txsAdditional[i] != nil {
+			result[i]["transactionHash"] = txsAdditional[i].Hash
+		}
 	}
 	return result, nil
 }
