@@ -238,7 +238,17 @@ func (b *Backend) GetTransactionReceipt(hash common.Hash) (map[string]interface{
 		return nil, fmt.Errorf("failed to get sender: %w", err)
 	}
 
-	return rpctypes.RPCMarshalReceipt(receipts[0], ethTx, from)
+	result, err := rpctypes.RPCMarshalReceipt(receipts[0], ethTx, from)
+	if err != nil {
+		return nil, err
+	}
+	// RPCMarshalReceipt computes transactionHash from ethTx.Hash(), which for derived
+	// txs is the reconstructed LegacyTx hash — different from the event-emitted hash.
+	// Override so eth_getTransactionReceipt agrees with eth_getTransactionByHash.
+	if additional != nil {
+		result["transactionHash"] = additional.Hash
+	}
+	return result, nil
 }
 
 // GetTransactionLogs returns the transaction logs identified by hash.

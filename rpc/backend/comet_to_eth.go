@@ -215,16 +215,21 @@ func (b *Backend) parseDerivedTxFromAdditionalFields(
 	recipient := additional.Recipient
 	gas := gasForDerivedEthTx(additional)
 
-	t := ethtypes.NewTx(&ethtypes.LegacyTx{
-		Nonce:    additional.Nonce,
-		Data:     additional.Data,
-		Gas:      gas,
-		To:       &recipient,
-		GasPrice: nil,
-		Value:    additional.Value,
-		V:        big.NewInt(0),
-		R:        big.NewInt(0),
-		S:        big.NewInt(0),
+	// Use DynamicFeeTx (type 0x2) with explicit zero fee fields so that
+	// unsignedTxAsMessage never dereferences a nil GasPrice. LegacyTx with
+	// GasPrice: nil panics inside new(big.Int).Set(tx.GasPrice()).
+	t := ethtypes.NewTx(&ethtypes.DynamicFeeTx{
+		ChainID:   b.EvmChainID,
+		Nonce:     additional.Nonce,
+		Data:      additional.Data,
+		Gas:       gas,
+		To:        &recipient,
+		Value:     additional.Value,
+		GasFeeCap: big.NewInt(0),
+		GasTipCap: big.NewInt(0),
+		V:         big.NewInt(0),
+		R:         big.NewInt(0),
+		S:         big.NewInt(0),
 	})
 	ethMsg := &evmtypes.MsgEthereumTx{}
 	ethMsg.FromEthereumTx(t)
