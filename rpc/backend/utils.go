@@ -1,6 +1,7 @@
 package backend
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
 	"math/big"
@@ -315,6 +316,28 @@ func GetLogsFromBlockResults(blockRes *cmtrpctypes.ResultBlockResults) ([][]*eth
 		logs, err := evmtypes.DecodeTxLogs(txResult.Data, height)
 		if err != nil {
 			return nil, err
+		}
+		// Derived txs have no MsgEthereumTxResponse in txResult.Data; their logs
+		// are emitted as EventTypeTxLog ABCI events. Fall back to scanning events
+		// when DecodeTxLogs returns nothing.
+		if len(logs) == 0 {
+			for _, event := range txResult.Events {
+				if event.Type != evmtypes.EventTypeTxLog {
+					continue
+				}
+				for _, attr := range event.Attributes {
+					if attr.Key != evmtypes.AttributeKeyTxLog {
+						continue
+					}
+					var evmLog evmtypes.Log
+					if err := json.Unmarshal([]byte(attr.Value), &evmLog); err != nil {
+						return nil, err
+					}
+					l := evmLog.ToEthereum()
+					l.BlockNumber = height
+					logs = append(logs, l)
+				}
+			}
 		}
 		blockLogs = append(blockLogs, logs)
 	}

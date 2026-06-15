@@ -6,7 +6,6 @@ import (
 	"math"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/pkg/errors"
 
 	tmrpcclient "github.com/cometbft/cometbft/rpc/client"
@@ -44,13 +43,20 @@ func (b *Backend) TraceTransaction(hash common.Hash, config *rpctypes.TraceConfi
 		return nil, fmt.Errorf("tx count %d is overflowing", len(blk.Block.Txs))
 	}
 	txsLen := uint32(len(blk.Block.Txs)) // #nosec G115 -- checked for int overflow already
-	if txsLen < transaction.TxIndex {
+	if txsLen <= transaction.TxIndex {
 		b.Logger.Debug("tx index out of bounds", "index", transaction.TxIndex, "hash", hash.String(), "height", blk.Block.Height)
 		return nil, fmt.Errorf("transaction not included in block %v", blk.Block.Height)
 	}
 
 	var predecessors []*evmtypes.MsgEthereumTx
-	for i := 0; i < int(transaction.TxIndex); i++ {
+	// Use EthTxIndex (Ethereum execution counter) as the loop bound, not TxIndex
+	// (Cosmos tx slot). The two diverge whenever a Cosmos tx holds multiple EVM
+	// messages, contains no EVM messages, or derived txs shift the counter.
+	ethTxCount := int(transaction.EthTxIndex)
+	if ethTxCount < 0 {
+		ethTxCount = 0
+	}
+	for i := 0; i < ethTxCount; i++ {
 		predecessorTx, txAdditional, err := b.GetTxByTxIndex(blk.Block.Height, uint(i))
 		if err != nil {
 			b.Logger.Debug("failed to get tx by index",
@@ -60,47 +66,31 @@ func (b *Backend) TraceTransaction(hash common.Hash, config *rpctypes.TraceConfi
 			continue
 		}
 
+		// The after-loop section below handles all predecessors that share the same
+		// Cosmos tx slot as the target (intra-tx ordering by MsgIndex / derived-tx
+		// event order). Skip them here to avoid double-counting.
+		if int(predecessorTx.TxIndex) == int(transaction.TxIndex) {
+			continue
+		}
+
 		if txAdditional != nil {
-			// This is a derived tx, fetch all derived txs from events in this Cosmos tx
-			blockRes, err := b.RPCClient.BlockResults(b.Ctx, &blk.Block.Height)
-			if err == nil && i < len(blockRes.TxsResults) {
-				txResult := blockRes.TxsResults[i]
-				cosmosTx, err := b.ClientCtx.TxConfig.TxDecoder()(blk.Block.Txs[i])
-				if err == nil {
-					parsedTxs, err := rpctypes.ParseTxResult(txResult, cosmosTx)
-					if err == nil {
-						for _, parsedTx := range parsedTxs.Txs {
-							// Stop when we reach the current transaction
-							if parsedTx.Hash == txAdditional.Hash {
-								break
-							}
-							// Only include derived txs
-							if parsedTx.Type == evmtypes.DerivedTxType {
-								ethMsg := b.parseDerivedTxFromAdditionalFields(&rpctypes.TxResultAdditionalFields{
-									Value:     parsedTx.Amount,
-									Hash:      parsedTx.Hash,
-									TxHash:    parsedTx.TxHash,
-									Type:      parsedTx.Type,
-									Recipient: parsedTx.Recipient,
-									Sender:    parsedTx.Sender,
-									GasUsed:   parsedTx.GasUsed,
-									Data:      parsedTx.Data,
-									Nonce:     parsedTx.Nonce,
-									GasLimit:  &parsedTx.GasLimit,
-								})
-								if ethMsg != nil {
-									predecessors = append(predecessors, ethMsg)
-								}
-							}
-						}
-					}
-				}
+			// Derived tx: add it directly. The old approach scanned parsedTxs.Txs
+			// for "all derived txs before txAdditional.Hash", which (a) skipped the
+			// tx at txAdditional.Hash itself — so the last derived tx in a series
+			// was always missed — and (b) double-counted earlier derived txs that
+			// were already added by their own outer-loop iterations. Each iteration
+			// of this loop corresponds to exactly one Ethereum execution, so adding
+			// txAdditional directly is both correct and complete.
+			ethMsg := b.parseDerivedTxFromAdditionalFields(txAdditional)
+			if ethMsg != nil {
+				predecessors = append(predecessors, ethMsg)
 			}
 			continue
 		}
 
-		// Fallback: decode as normal Cosmos tx
-		tx, err := b.ClientCtx.TxConfig.TxDecoder()(blk.Block.Txs[i])
+		// Fallback: decode as normal Cosmos tx. Use predecessorTx.TxIndex (Cosmos slot)
+		// rather than i (Ethereum index) to address the correct block entry.
+		tx, err := b.ClientCtx.TxConfig.TxDecoder()(blk.Block.Txs[predecessorTx.TxIndex])
 		if err != nil {
 			b.Logger.Debug("failed to decode transaction in block",
 				"height", blk.Block.Height,
@@ -109,14 +99,13 @@ func (b *Backend) TraceTransaction(hash common.Hash, config *rpctypes.TraceConfi
 			continue
 		}
 
-		index := int(predecessorTx.MsgIndex)
-		for j := 0; j < index; j++ {
-			msg := tx.GetMsgs()[j]
-			// Check if it’s a normal Ethereum tx
-			if ethMsg, ok := msg.(*evmtypes.MsgEthereumTx); ok {
-				predecessors = append(predecessors, ethMsg)
-				continue
-			}
+		// Add the EVM message at this Ethereum index directly. The inner loop used
+		// here previously ran j < MsgIndex, which added only messages BEFORE the
+		// current position and left the message AT MsgIndex itself unhandled —
+		// causing the last message of any multi-message predecessor Cosmos tx to
+		// be silently dropped from the predecessor set.
+		if ethMsg, ok := tx.GetMsgs()[int(predecessorTx.MsgIndex)].(*evmtypes.MsgEthereumTx); ok {
+			predecessors = append(predecessors, ethMsg)
 		}
 	}
 
@@ -126,15 +115,28 @@ func (b *Backend) TraceTransaction(hash common.Hash, config *rpctypes.TraceConfi
 		return nil, err
 	}
 
-	// add predecessor messages in current cosmos tx
-	index := int(transaction.MsgIndex) // #nosec G115
-
-	for i := 0; i < index; i++ {
-		msg := tx.GetMsgs()[i]
-		// Check if it's a normal Ethereum tx
-		if ethMsg, ok := msg.(*evmtypes.MsgEthereumTx); ok {
-			predecessors = append(predecessors, ethMsg)
-			continue
+	// Add the standard EVM predecessor messages that live in the target's own
+	// Cosmos tx. This only applies to a NON-derived target: transaction.MsgIndex
+	// is then a genuine Cosmos-message index, so iterating tx.GetMsgs()[0:MsgIndex]
+	// collects the earlier MsgEthereumTx messages of the same tx.
+	//
+	// For a DERIVED target, MsgIndex is the derived-tx ordinal among the txs the
+	// Cosmos tx emitted (0, 1, 2, …), NOT a Cosmos-message index. A single
+	// MsgExecutePayload can emit several derived EVM txs (deployUEA + … +
+	// executePayload), so MsgIndex routinely exceeds len(tx.GetMsgs()) and the old
+	// unconditional loop indexed past the message array and panicked
+	// (F-2026-17754). The in-tx predecessors of a derived target are assembled from
+	// the Cosmos tx's events in the derived-tx block below, which is the correct
+	// index domain, so this loop must be skipped for derived targets.
+	if additional == nil {
+		index := int(transaction.MsgIndex) // #nosec G115
+		for i := 0; i < index; i++ {
+			msg := tx.GetMsgs()[i]
+			// Check if it's a normal Ethereum tx
+			if ethMsg, ok := msg.(*evmtypes.MsgEthereumTx); ok {
+				predecessors = append(predecessors, ethMsg)
+				continue
+			}
 		}
 	}
 
@@ -142,7 +144,7 @@ func (b *Backend) TraceTransaction(hash common.Hash, config *rpctypes.TraceConfi
 	if additional != nil {
 		// This is a derived tx, fetch all derived txs from events in this Cosmos tx
 		blockRes, err := b.RPCClient.BlockResults(b.Ctx, &blk.Block.Height)
-		if err == nil && int(transaction.TxIndex) < len(blockRes.TxsResults) {
+		if err == nil && blockRes != nil && int(transaction.TxIndex) < len(blockRes.TxsResults) {
 			txResult := blockRes.TxsResults[transaction.TxIndex]
 			parsedTxs, err := rpctypes.ParseTxResult(txResult, tx)
 			if err == nil {
@@ -256,11 +258,7 @@ func (b *Backend) TraceBlock(height rpctypes.BlockNumber,
 	config *rpctypes.TraceConfig,
 	block *tmrpctypes.ResultBlock,
 ) ([]*evmtypes.TxTraceResult, error) {
-	txs := block.Block.Txs
-	txsLength := len(txs)
-
-	if txsLength == 0 {
-		// If there are no transactions return empty array
+	if len(block.Block.Txs) == 0 {
 		return []*evmtypes.TxTraceResult{}, nil
 	}
 
@@ -269,28 +267,11 @@ func (b *Backend) TraceBlock(height rpctypes.BlockNumber,
 		b.Logger.Debug("block result not found", "height", block.Block.Height, "error", err.Error())
 		return nil, nil
 	}
-	txDecoder := b.ClientCtx.TxConfig.TxDecoder()
 
-	var txsMessages []*evmtypes.MsgEthereumTx
-	for i, tx := range txs {
-		if !rpctypes.TxSucessOrExpectedFailure(blockRes.TxsResults[i]) {
-			b.Logger.Debug("invalid tx result code", "cosmos-hash", hexutil.Encode(tx.Hash()))
-			continue
-		}
-		decodedTx, err := txDecoder(tx)
-		if err != nil {
-			b.Logger.Error("failed to decode transaction", "hash", txs[i].Hash(), "error", err.Error())
-			continue
-		}
-
-		for _, msg := range decodedTx.GetMsgs() {
-			ethMessage, ok := msg.(*evmtypes.MsgEthereumTx)
-			if !ok {
-				// Just considers Ethereum transactions
-				continue
-			}
-			txsMessages = append(txsMessages, ethMessage)
-		}
+	// EthMsgsFromCometBlock returns both native MsgEthereumTx and derived txs.
+	txsMessages, _ := b.EthMsgsFromCometBlock(block, blockRes)
+	if len(txsMessages) == 0 {
+		return []*evmtypes.TxTraceResult{}, nil
 	}
 
 	// minus one to get the context at the beginning of the block
@@ -327,7 +308,7 @@ func (b *Backend) TraceBlock(height rpctypes.BlockNumber,
 		return nil, err
 	}
 
-	decodedResults := make([]*evmtypes.TxTraceResult, txsLength)
+	decodedResults := make([]*evmtypes.TxTraceResult, len(txsMessages))
 	if err := json.Unmarshal(res.Data, &decodedResults); err != nil {
 		return nil, err
 	}

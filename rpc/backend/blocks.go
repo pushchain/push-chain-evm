@@ -197,9 +197,9 @@ func (b *Backend) GetBlockReceipts(
 		return nil, fmt.Errorf("block result not found for height %d", resBlock.Block.Height)
 	}
 
-	msgs, _ := b.EthMsgsFromCometBlock(resBlock, blockRes)
+	msgs, txsAdditional := b.EthMsgsFromCometBlock(resBlock, blockRes)
 
-	receipts, err := b.ReceiptsFromCometBlock(resBlock, blockRes, msgs)
+	receipts, err := b.ReceiptsFromCometBlock(resBlock, blockRes, msgs, txsAdditional)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get receipts from comet block: %w, ", err)
 
@@ -222,6 +222,11 @@ func (b *Backend) GetBlockReceipts(
 		result[i], err = types.RPCMarshalReceipt(receipts[i], tx, from)
 		if err != nil {
 			return nil, fmt.Errorf("failed to marshal receipt")
+		}
+		// Same override as GetTransactionReceipt: derived txs have an event-emitted
+		// hash that differs from the reconstructed LegacyTx hash.
+		if txsAdditional[i] != nil {
+			result[i]["transactionHash"] = txsAdditional[i].Hash
 		}
 	}
 	return result, nil

@@ -446,6 +446,14 @@ func (m *MockIndexer) GetByBlockAndIndex(blockNumber int64, txIndex int32) (*ser
 	return nil, nil
 }
 
+func (m *MockIndexer) IsDerivedTx(hash common.Hash) (bool, error) {
+	return false, nil
+}
+
+func (m *MockIndexer) IsDerivedTxByBlockAndIndex(blockNumber int64, txIndex int32) (bool, error) {
+	return false, nil
+}
+
 func TestReceiptsFromCometBlock(t *testing.T) {
 	backend := setupMockBackend(t)
 	height := int64(100)
@@ -491,7 +499,7 @@ func TestReceiptsFromCometBlock(t *testing.T) {
 			backend.Indexer = mockIndexer
 			mockEVMQueryClient := backend.QueryClient.QueryClient.(*mocks.EVMQueryClient)
 			mockEVMQueryClient.On("BaseFee", mock.Anything, mock.Anything).Return(&evmtypes.QueryBaseFeeResponse{}, nil)
-			receipts, err := backend.ReceiptsFromCometBlock(resBlock, blockRes, msgs)
+			receipts, err := backend.ReceiptsFromCometBlock(resBlock, blockRes, msgs, nil)
 			require.NoError(t, err)
 			require.Len(t, receipts, 1)
 			actualTxIndex := receipts[0].TransactionIndex

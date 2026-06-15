@@ -1,6 +1,7 @@
 package backend
 
 import (
+	"encoding/json"
 	"fmt"
 	"math/big"
 
@@ -42,13 +43,55 @@ func (b *Backend) RPCBlockFromCometBlock(
 	blockRes *cmtrpctypes.ResultBlockResults,
 	fullTx bool,
 ) (map[string]interface{}, error) {
-	msgs, _ := b.EthMsgsFromCometBlock(resBlock, blockRes)
+	msgs, txsAdditional := b.EthMsgsFromCometBlock(resBlock, blockRes)
 	ethBlock, err := b.EthBlockFromCometBlock(resBlock, blockRes)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get rpc block from comet block: %w", err)
 	}
 
-	return rpctypes.RPCMarshalBlock(ethBlock, resBlock, msgs, true, fullTx, b.ChainConfig())
+	fields, err := rpctypes.RPCMarshalBlock(ethBlock, resBlock, msgs, true, fullTx, b.ChainConfig())
+	if err != nil {
+		return nil, err
+	}
+
+	// RPCMarshalBlock reads ethBlock.Transactions() which excludes derived txs (they
+	// are intentionally omitted from the ethBlock body in EthBlockFromCometBlock).
+	// Override the transactions field here so derived txs appear in the RPC response
+	// with their event-assigned hashes, not the reconstructed LegacyTx hash.
+	block := resBlock.Block
+	blockHash := common.BytesToHash(block.Hash())
+	blockHeight := uint64(block.Height) //nolint:gosec // G115
+	blockTime := uint64(block.Time.Unix()) //nolint:gosec // G115
+	baseFee, _ := b.BaseFee(blockRes)
+
+	ethRPCTxs := make([]interface{}, 0, len(msgs))
+	for txIndex, ethMsg := range msgs {
+		if !fullTx {
+			var hash common.Hash
+			if txsAdditional[txIndex] != nil {
+				hash = txsAdditional[txIndex].Hash
+			} else {
+				hash = ethMsg.Hash()
+			}
+			ethRPCTxs = append(ethRPCTxs, hash)
+			continue
+		}
+		index := uint64(txIndex) //nolint:gosec // G115
+		if txsAdditional[txIndex] == nil {
+			rpcTx := rpctypes.NewTransactionFromMsg(ethMsg, blockHash, blockHeight, blockTime, index, baseFee, b.ChainConfig())
+			ethRPCTxs = append(ethRPCTxs, rpcTx)
+		} else {
+			rpcTx, txErr := rpctypes.NewRPCTransactionFromIncompleteMsg(ethMsg, blockHash, blockHeight, index, baseFee, b.EvmChainID, txsAdditional[txIndex].Hash)
+			if txErr != nil {
+				b.Logger.Debug("NewRPCTransactionFromIncompleteMsg failed", "error", txErr)
+				continue
+			}
+			ethRPCTxs = append(ethRPCTxs, rpcTx)
+		}
+	}
+	fields["transactions"] = ethRPCTxs
+
+	return fields, nil
 }
 
 // BlockNumberFromComet returns the BlockNumber from BlockNumberOrHash
@@ -172,16 +215,21 @@ func (b *Backend) parseDerivedTxFromAdditionalFields(
 	recipient := additional.Recipient
 	gas := gasForDerivedEthTx(additional)
 
-	t := ethtypes.NewTx(&ethtypes.LegacyTx{
-		Nonce:    additional.Nonce,
-		Data:     additional.Data,
-		Gas:      gas,
-		To:       &recipient,
-		GasPrice: nil,
-		Value:    additional.Value,
-		V:        big.NewInt(0),
-		R:        big.NewInt(0),
-		S:        big.NewInt(0),
+	// Use DynamicFeeTx (type 0x2) with explicit zero fee fields so that
+	// unsignedTxAsMessage never dereferences a nil GasPrice. LegacyTx with
+	// GasPrice: nil panics inside new(big.Int).Set(tx.GasPrice()).
+	t := ethtypes.NewTx(&ethtypes.DynamicFeeTx{
+		ChainID:   b.EvmChainID,
+		Nonce:     additional.Nonce,
+		Data:      additional.Data,
+		Gas:       gas,
+		To:        &recipient,
+		Value:     additional.Value,
+		GasFeeCap: big.NewInt(0),
+		GasTipCap: big.NewInt(0),
+		V:         big.NewInt(0),
+		R:         big.NewInt(0),
+		S:         big.NewInt(0),
 	})
 	ethMsg := &evmtypes.MsgEthereumTx{}
 	ethMsg.FromEthereumTx(t)
@@ -256,7 +304,7 @@ func (b *Backend) EthBlockFromCometBlock(
 	}
 
 	// 7. receipts
-	receipts, err := b.ReceiptsFromCometBlock(resBlock, blockRes, msgs)
+	receipts, err := b.ReceiptsFromCometBlock(resBlock, blockRes, msgs, additionals)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get receipts from comet block: %w", err)
 	}
@@ -310,10 +358,39 @@ func (b *Backend) MinerFromCometBlock(
 	return common.BytesToAddress(validatorAccAddr), nil
 }
 
+// derivedTxLogsFromEvents finds EVM logs for a derived tx by scanning tx_log events and
+// matching each log's TxHash to the given hash. Returns nil, nil when no matching logs are
+// found — valid for a successful derived tx that emits no EVM events.
+func derivedTxLogsFromEvents(events []abci.Event, txHash common.Hash, blockNumber uint64) ([]*ethtypes.Log, error) {
+	var result []*ethtypes.Log
+	for _, event := range events {
+		if event.Type != evmtypes.EventTypeTxLog {
+			continue
+		}
+		for _, attr := range event.Attributes {
+			if attr.Key != evmtypes.AttributeKeyTxLog {
+				continue
+			}
+			var log evmtypes.Log
+			if err := json.Unmarshal([]byte(attr.Value), &log); err != nil {
+				return nil, err
+			}
+			if common.HexToHash(log.TxHash) != txHash {
+				continue
+			}
+			l := log.ToEthereum()
+			l.BlockNumber = blockNumber
+			result = append(result, l)
+		}
+	}
+	return result, nil
+}
+
 func (b *Backend) ReceiptsFromCometBlock(
 	resBlock *cmtrpctypes.ResultBlock,
 	blockRes *cmtrpctypes.ResultBlockResults,
 	msgs []*evmtypes.MsgEthereumTx,
+	additionals []*rpctypes.TxResultAdditionalFields,
 ) ([]*ethtypes.Receipt, error) {
 	baseFee, err := b.BaseFee(blockRes)
 	if err != nil {
@@ -321,13 +398,27 @@ func (b *Backend) ReceiptsFromCometBlock(
 		b.Logger.Error("failed to fetch Base Fee from prunned block. Check node prunning configuration", "height", resBlock.Block.Height, "error", err)
 	}
 
+	blockHeight := uint64(resBlock.Block.Height) // #nosec G115
 	blockHash := common.BytesToHash(resBlock.BlockID.Hash)
 	receipts := make([]*ethtypes.Receipt, len(msgs))
 	cumulatedGasUsed := uint64(0)
 	for i, ethMsg := range msgs {
-		txResult, _, err := b.GetTxByEthHash(ethMsg.Hash())
+		var additional *rpctypes.TxResultAdditionalFields
+		if additionals != nil && i < len(additionals) {
+			additional = additionals[i]
+		}
+
+		// Derived txs must be looked up by the event hash (additional.Hash); native txs use ethMsg.Hash().
+		var lookupHash common.Hash
+		if additional != nil {
+			lookupHash = additional.Hash
+		} else {
+			lookupHash = ethMsg.Hash()
+		}
+
+		txResult, _, err := b.GetTxByEthHash(lookupHash)
 		if err != nil {
-			return nil, fmt.Errorf("tx not found: hash=%s, error=%s", ethMsg.Hash(), err.Error())
+			return nil, fmt.Errorf("tx not found: hash=%s, error=%s", lookupHash, err.Error())
 		}
 
 		cumulatedGasUsed += txResult.GasUsed
@@ -351,17 +442,39 @@ func (b *Backend) ReceiptsFromCometBlock(
 			contractAddress = crypto.CreateAddress(ethMsg.GetSender(), ethMsg.Raw.Nonce())
 		}
 
-		msgIndex := int(txResult.MsgIndex) // #nosec G115 -- checked for int overflow already
-		logs, err := evmtypes.DecodeMsgLogs(
-			blockRes.TxsResults[txResult.TxIndex].Data,
-			msgIndex,
-			uint64(resBlock.Block.Height), // #nosec G115 -- checked for int overflow already
-		)
-		if err != nil {
-			return nil, fmt.Errorf("failed to convert tx result to eth receipt: %w", err)
+		var logs []*ethtypes.Log
+		if additional != nil {
+			// Derived tx: no MsgEthereumTxResponse in the Cosmos tx Data field.
+			// Parse logs from tx_log ABCI events by matching TxHash instead.
+			logs, err = derivedTxLogsFromEvents(
+				blockRes.TxsResults[txResult.TxIndex].Events,
+				additional.Hash,
+				blockHeight,
+			)
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse derived tx logs: %w", err)
+			}
+		} else {
+			msgIndex := int(txResult.MsgIndex) // #nosec G115 -- checked for int overflow already
+			logs, err = evmtypes.DecodeMsgLogs(
+				blockRes.TxsResults[txResult.TxIndex].Data,
+				msgIndex,
+				blockHeight,
+			)
+			if err != nil {
+				return nil, fmt.Errorf("failed to convert tx result to eth receipt: %w", err)
+			}
 		}
 
 		bloom := ethtypes.CreateBloom(&ethtypes.Receipt{Logs: logs})
+
+		// Derived txs use the event hash as the canonical TxHash in the receipt.
+		var txHash common.Hash
+		if additional != nil {
+			txHash = additional.Hash
+		} else {
+			txHash = ethMsg.Hash()
+		}
 
 		receipt := &ethtypes.Receipt{
 			// Consensus fields: These fields are defined by the Yellow Paper
@@ -373,7 +486,7 @@ func (b *Backend) ReceiptsFromCometBlock(
 			Logs:              logs,
 
 			// Implementation fields: These fields are added by geth when processing a transaction.
-			TxHash:            ethMsg.Hash(),
+			TxHash:            txHash,
 			ContractAddress:   contractAddress,
 			GasUsed:           txResult.GasUsed,
 			EffectiveGasPrice: effectiveGasPrice,

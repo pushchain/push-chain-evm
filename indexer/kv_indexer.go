@@ -76,10 +76,10 @@ func (kv *KVIndexer) IndexBlock(block *cmttypes.Block, txResults []*abci.ExecTxR
 		if !isEthTx(tx) {
 			// Derived txs (internal EVM executions emitted only as events, not as an
 			// embedded MsgEthereumTx) still occupy slots in the block's eth-tx index
-			// sequence (#18). Index them by hash and by (height, ethTxIndex), advancing
+			// sequence. Index them by hash and by (height, ethTxIndex), advancing
 			// the shared ethTxIndex so it stays aligned with the emitted txIndex for any
 			// standard eth txs that follow in the same block.
-			ethTxIndex, err = kv.indexDerivedTxs(batch, height, uint32(txIndex), result, ethTxIndex) //#nosec G115 -- int overflow is not a concern here
+			ethTxIndex, err = kv.indexDerivedTxs(batch, height, uint32(txIndex), result, ethTxIndex) //#nosec G115
 			if err != nil {
 				kv.logger.Error("Fail to index derived txs", "err", err, "block", height, "txIndex", txIndex)
 			}

@@ -49,14 +49,21 @@ func (b *Backend) GetTransactionByHash(txHash common.Hash) (*rpctypes.RPCTransac
 
 	var ethMsg *evmtypes.MsgEthereumTx
 	if additional == nil {
-		// #nosec G115 always in range
+		if int(res.TxIndex) >= len(block.Block.Txs) { //nolint:gosec // G115
+			return nil, fmt.Errorf("tx index %d out of range for block with %d txs", res.TxIndex, len(block.Block.Txs))
+		}
 		tx, err := b.ClientCtx.TxConfig.TxDecoder()(block.Block.Txs[res.TxIndex])
 		if err != nil {
 			b.Logger.Debug("decoding failed", "error", err.Error())
 			return nil, fmt.Errorf("failed to decode tx: %w", err)
 		}
-		ethMsg = tx.GetMsgs()[res.MsgIndex].(*evmtypes.MsgEthereumTx)
-		if ethMsg == nil {
+		msgs := tx.GetMsgs()
+		if int(res.MsgIndex) >= len(msgs) { //nolint:gosec // G115
+			return nil, fmt.Errorf("msg index %d out of range for tx with %d msgs", res.MsgIndex, len(msgs))
+		}
+		var ok bool
+		ethMsg, ok = msgs[res.MsgIndex].(*evmtypes.MsgEthereumTx)
+		if !ok || ethMsg == nil {
 			b.Logger.Error("failed to get eth msg from sdk.Msgs")
 			return nil, fmt.Errorf("failed to get eth msg from sdk.Msgs")
 		}
@@ -221,7 +228,7 @@ func (b *Backend) GetTransactionReceipt(hash common.Hash) (map[string]interface{
 		return nil, fmt.Errorf("block result not found at height %d: %w", res.Height, err)
 	}
 
-	receipts, err := b.ReceiptsFromCometBlock(resBlock, blockRes, []*evmtypes.MsgEthereumTx{ethMsg})
+	receipts, err := b.ReceiptsFromCometBlock(resBlock, blockRes, []*evmtypes.MsgEthereumTx{ethMsg}, []*rpctypes.TxResultAdditionalFields{additional})
 	if err != nil {
 		return nil, fmt.Errorf("failed to get receipts from comet block")
 	}
@@ -238,14 +245,24 @@ func (b *Backend) GetTransactionReceipt(hash common.Hash) (map[string]interface{
 		return nil, fmt.Errorf("failed to get sender: %w", err)
 	}
 
-	return rpctypes.RPCMarshalReceipt(receipts[0], ethTx, from)
+	result, err := rpctypes.RPCMarshalReceipt(receipts[0], ethTx, from)
+	if err != nil {
+		return nil, err
+	}
+	// RPCMarshalReceipt computes transactionHash from ethTx.Hash(), which for derived
+	// txs is the reconstructed LegacyTx hash — different from the event-emitted hash.
+	// Override so eth_getTransactionReceipt agrees with eth_getTransactionByHash.
+	if additional != nil {
+		result["transactionHash"] = additional.Hash
+	}
+	return result, nil
 }
 
 // GetTransactionLogs returns the transaction logs identified by hash.
 func (b *Backend) GetTransactionLogs(hash common.Hash) ([]*ethtypes.Log, error) {
 	hexTx := hash.Hex()
 
-	res, _, err := b.GetTxByEthHash(hash)
+	res, additional, err := b.GetTxByEthHash(hash)
 	if err != nil {
 		b.Logger.Debug("tx not found", "hash", hexTx, "error", err.Error())
 		return nil, nil
@@ -265,7 +282,17 @@ func (b *Backend) GetTransactionLogs(hash common.Hash) ([]*ethtypes.Log, error) 
 	if err != nil {
 		return nil, err
 	}
-	// parse tx logs from events
+
+	if additional != nil {
+		// Derived tx: no MsgEthereumTxResponse in the Cosmos tx Data field.
+		// Parse logs from tx_log ABCI events by matching TxHash instead.
+		return derivedTxLogsFromEvents(
+			resBlockResult.TxsResults[res.TxIndex].Events,
+			additional.Hash,
+			height,
+		)
+	}
+
 	index := int(res.MsgIndex) // #nosec G701
 	logs, err := evmtypes.DecodeMsgLogs(
 		resBlockResult.TxsResults[res.TxIndex].Data,
@@ -319,77 +346,13 @@ func (b *Backend) GetTransactionByBlockNumberAndIndex(blockNum rpctypes.BlockNum
 	return b.GetTransactionByBlockAndIndex(block, idx)
 }
 
-// GetTxByEthHash uses `/tx_query` to find transaction by ethereum tx hash
-// TODO: Don't need to convert once hashing is fixed on CometBFT
-// https://github.com/cometbft/cometbft/issues/6539
-func (b *Backend) GetTxByEthHash(hash common.Hash) (*servertypes.TxResult, *rpctypes.TxResultAdditionalFields, error) {
-	if b.Indexer != nil {
-		txRes, err := b.Indexer.GetByTxHash(hash)
-		if err != nil {
-			return nil, nil, err
-		}
-		return txRes, nil, nil
-	}
-
-	// fallback to CometBFT tx indexer
-	query := fmt.Sprintf("%s.%s='%s'", evmtypes.TypeMsgEthereumTx, evmtypes.AttributeKeyEthereumTxHash, hash.Hex())
-	txResult, txAdditional, err := b.QueryCometTxIndexer(query, func(txs *rpctypes.ParsedTxs) *rpctypes.ParsedTx {
-		return txs.GetTxByHash(hash)
-	})
-	if err != nil {
-		return nil, nil, errorsmod.Wrapf(err, "GetTxByEthHash %s", hash.Hex())
-	}
-	return txResult, txAdditional, nil
-}
-
-func (b *Backend) GetTxByEthHashAndMsgIndex(hash common.Hash, index int) (*servertypes.TxResult, *rpctypes.TxResultAdditionalFields, error) {
-	if b.Indexer != nil {
-		txRes, err := b.Indexer.GetByTxHash(hash)
-		if err != nil {
-			return nil, nil, err
-		}
-		return txRes, nil, nil
-	}
-
-	// fallback to CometBFT tx indexer
-	query := fmt.Sprintf("%s.%s='%s'", evmtypes.TypeMsgEthereumTx, evmtypes.AttributeKeyEthereumTxHash, hash.Hex())
-	txResult, txAdditional, err := b.QueryCometTxIndexer(query, func(txs *rpctypes.ParsedTxs) *rpctypes.ParsedTx {
-		return txs.GetTxByMsgIndex(index)
-	})
-	if err != nil {
-		return nil, nil, errorsmod.Wrapf(err, "GetTxByEthHash %s", hash.Hex())
-	}
-	return txResult, txAdditional, nil
-}
-
-// GetTxByTxIndex uses `/tx_query` to find transaction by tx index of valid ethereum txs
-func (b *Backend) GetTxByTxIndex(height int64, index uint) (*servertypes.TxResult, *rpctypes.TxResultAdditionalFields, error) {
-	int32Index := int32(index) //#nosec G115 -- checked for int overflow already
-	if b.Indexer != nil {
-		txRes, err := b.Indexer.GetByBlockAndIndex(height, int32Index)
-		if err == nil {
-			return txRes, nil, nil
-		}
-	}
-
-	// fallback to CometBFT tx indexer
-	query := fmt.Sprintf("tx.height=%d AND %s.%s=%d",
-		height, evmtypes.TypeMsgEthereumTx,
-		evmtypes.AttributeKeyTxIndex, index,
-	)
-	txResult, txAdditional, err := b.QueryCometTxIndexer(query, func(txs *rpctypes.ParsedTxs) *rpctypes.ParsedTx {
-		return txs.GetTxByTxIndex(int(index)) // #nosec G115 -- checked for int overflow already
-	})
-	if err != nil {
-		return nil, nil, errorsmod.Wrapf(err, "GetTxByTxIndex %d %d", height, index)
-	}
-	return txResult, txAdditional, nil
-}
-
 // derivedTxAdditionalFields rebuilds the TxResultAdditionalFields for a tx located via
 // the KV indexer when (and only when) that tx is a derived EVM tx — an internal execution
-// recorded only as events, with no embedded MsgEthereumTx to decode. Standard txs return
-// (nil, nil); the IsDerivedTx marker keeps their lookups cheap (one key read, no event re-parse).
+// recorded only as events, with no embedded MsgEthereumTx to decode. The KV indexer stores
+// just the TxResult, so without this the serving paths (GetTransactionByHash / Receipt /
+// TraceTransaction) would treat a derived tx as standard and panic on the MsgEthereumTx
+// cast. Standard txs return (nil, nil); the IsDerivedTx marker gate keeps their lookups
+// cheap (one key read, no event reparse).
 func (b *Backend) derivedTxAdditionalFields(hash common.Hash, res *servertypes.TxResult) (*rpctypes.TxResultAdditionalFields, error) {
 	derived, err := b.Indexer.IsDerivedTx(hash)
 	if err != nil {
@@ -401,8 +364,11 @@ func (b *Backend) derivedTxAdditionalFields(hash common.Hash, res *servertypes.T
 	return b.buildDerivedAdditional(res)
 }
 
-// buildDerivedAdditional re-parses the block events for res's Cosmos tx and rebuilds
-// TxResultAdditionalFields for the derived EVM tx at res.MsgIndex.
+// buildDerivedAdditional re-parses the block events for res's Cosmos tx and rebuilds the
+// TxResultAdditionalFields for the derived EVM tx at res.MsgIndex. Callers must have
+// already confirmed the entry is derived via a marker (IsDerivedTx for the by-hash path,
+// IsDerivedTxByBlockAndIndex for the by-block-index path), so a missing or non-derived
+// parse result is treated as an error.
 func (b *Backend) buildDerivedAdditional(res *servertypes.TxResult) (*rpctypes.TxResultAdditionalFields, error) {
 	blockRes, err := b.RPCClient.BlockResults(b.Ctx, &res.Height)
 	if err != nil {
@@ -434,6 +400,96 @@ func (b *Backend) buildDerivedAdditional(res *servertypes.TxResult) (*rpctypes.T
 		Nonce:     parsed.Nonce,
 		GasLimit:  &parsed.GasLimit,
 	}, nil
+}
+
+// GetTxByEthHash uses `/tx_query` to find transaction by ethereum tx hash
+// TODO: Don't need to convert once hashing is fixed on CometBFT
+// https://github.com/cometbft/cometbft/issues/6539
+func (b *Backend) GetTxByEthHash(hash common.Hash) (*servertypes.TxResult, *rpctypes.TxResultAdditionalFields, error) {
+	if b.Indexer != nil {
+		txRes, err := b.Indexer.GetByTxHash(hash)
+		if err == nil {
+			// Indexer hit: rebuild additional fields when this is a derived tx.
+			additional, derr := b.derivedTxAdditionalFields(hash, txRes)
+			if derr != nil {
+				return nil, nil, derr
+			}
+			return txRes, additional, nil
+		}
+		// Indexer miss — fall through to CometBFT tx_search for derived tx reconstruction.
+	}
+
+	// fallback to CometBFT tx indexer
+	query := fmt.Sprintf("%s.%s='%s'", evmtypes.TypeMsgEthereumTx, evmtypes.AttributeKeyEthereumTxHash, hash.Hex())
+	txResult, txAdditional, err := b.QueryCometTxIndexer(query, func(txs *rpctypes.ParsedTxs) *rpctypes.ParsedTx {
+		return txs.GetTxByHash(hash)
+	})
+	if err != nil {
+		return nil, nil, errorsmod.Wrapf(err, "GetTxByEthHash %s", hash.Hex())
+	}
+	return txResult, txAdditional, nil
+}
+
+func (b *Backend) GetTxByEthHashAndMsgIndex(hash common.Hash, index int) (*servertypes.TxResult, *rpctypes.TxResultAdditionalFields, error) {
+	if b.Indexer != nil {
+		txRes, err := b.Indexer.GetByTxHash(hash)
+		if err == nil {
+			// Indexer hit: rebuild additional fields when this is a derived tx.
+			additional, derr := b.derivedTxAdditionalFields(hash, txRes)
+			if derr != nil {
+				return nil, nil, derr
+			}
+			return txRes, additional, nil
+		}
+		// Indexer miss — fall through to CometBFT tx_search for derived tx reconstruction.
+	}
+
+	// fallback to CometBFT tx indexer
+	query := fmt.Sprintf("%s.%s='%s'", evmtypes.TypeMsgEthereumTx, evmtypes.AttributeKeyEthereumTxHash, hash.Hex())
+	txResult, txAdditional, err := b.QueryCometTxIndexer(query, func(txs *rpctypes.ParsedTxs) *rpctypes.ParsedTx {
+		return txs.GetTxByMsgIndex(index)
+	})
+	if err != nil {
+		return nil, nil, errorsmod.Wrapf(err, "GetTxByEthHash %s", hash.Hex())
+	}
+	return txResult, txAdditional, nil
+}
+
+// GetTxByTxIndex uses `/tx_query` to find transaction by tx index of valid ethereum txs
+func (b *Backend) GetTxByTxIndex(height int64, index uint) (*servertypes.TxResult, *rpctypes.TxResultAdditionalFields, error) {
+	int32Index := int32(index) //#nosec G115 -- checked for int overflow already
+	if b.Indexer != nil {
+		txRes, err := b.Indexer.GetByBlockAndIndex(height, int32Index)
+		if err == nil {
+			// Only derived block-index entries need their additional fields rebuilt (so
+			// trace predecessors reconstruct them instead of treating them as standard).
+			derived, derr := b.Indexer.IsDerivedTxByBlockAndIndex(height, int32Index)
+			if derr != nil {
+				return nil, nil, derr
+			}
+			if derived {
+				additional, aerr := b.buildDerivedAdditional(txRes)
+				if aerr != nil {
+					return nil, nil, aerr
+				}
+				return txRes, additional, nil
+			}
+			return txRes, nil, nil
+		}
+	}
+
+	// fallback to CometBFT tx indexer
+	query := fmt.Sprintf("tx.height=%d AND %s.%s=%d",
+		height, evmtypes.TypeMsgEthereumTx,
+		evmtypes.AttributeKeyTxIndex, index,
+	)
+	txResult, txAdditional, err := b.QueryCometTxIndexer(query, func(txs *rpctypes.ParsedTxs) *rpctypes.ParsedTx {
+		return txs.GetTxByTxIndex(int(index)) // #nosec G115 -- checked for int overflow already
+	})
+	if err != nil {
+		return nil, nil, errorsmod.Wrapf(err, "GetTxByTxIndex %d %d", height, index)
+	}
+	return txResult, txAdditional, nil
 }
 
 // QueryCometTxIndexer query tx in CometBFT tx indexer
@@ -489,8 +545,8 @@ func (b *Backend) GetTransactionByBlockAndIndex(block *cmtrpctypes.ResultBlock, 
 	}
 
 	height := uint64(block.Block.Height)               // #nosec G115 -- checked for int overflow already
-	blockTime := uint64(block.Block.Time.UTC().Unix())  // #nosec G115 -- checked for int overflow already
-	index := uint64(idx)                                // #nosec G115 -- checked for int overflow already
+	blockTime := uint64(block.Block.Time.UTC().Unix()) // #nosec G115 -- checked for int overflow already
+	index := uint64(idx)                               // #nosec G115 -- checked for int overflow already
 	blockHash := common.BytesToHash(block.Block.Hash())
 	if additional == nil {
 		return rpctypes.NewTransactionFromMsg(msg, blockHash, height, blockTime, index, baseFee, b.ChainConfig()), nil

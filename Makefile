@@ -384,9 +384,13 @@ test-system: build-v04 build
 	cd tests/systemtests/Counter && forge build
 	$(MAKE) -C tests/systemtests test
 
+# V04_REF is the fork's v0.4.0 release state (last commit before the v0.5.0
+# upgrade work began). This fork has no upstream-style v0.4.x git tag, so the
+# legacy binary for the v0.4.0-to-v0.5.0 upgrade test is built from this commit.
+V04_REF ?= b5053b7e
 build-v04:
 	mkdir -p ./tests/systemtests/binaries/v0.4
-	git checkout v0.4.1
+	git checkout $(V04_REF)
 	make build
 	cp $(BUILDDIR)/evmd ./tests/systemtests/binaries/v0.4
 	git checkout -
