@@ -115,15 +115,28 @@ func (b *Backend) TraceTransaction(hash common.Hash, config *rpctypes.TraceConfi
 		return nil, err
 	}
 
-	// add predecessor messages in current cosmos tx
-	index := int(transaction.MsgIndex) // #nosec G115
-
-	for i := 0; i < index; i++ {
-		msg := tx.GetMsgs()[i]
-		// Check if it's a normal Ethereum tx
-		if ethMsg, ok := msg.(*evmtypes.MsgEthereumTx); ok {
-			predecessors = append(predecessors, ethMsg)
-			continue
+	// Add the standard EVM predecessor messages that live in the target's own
+	// Cosmos tx. This only applies to a NON-derived target: transaction.MsgIndex
+	// is then a genuine Cosmos-message index, so iterating tx.GetMsgs()[0:MsgIndex]
+	// collects the earlier MsgEthereumTx messages of the same tx.
+	//
+	// For a DERIVED target, MsgIndex is the derived-tx ordinal among the txs the
+	// Cosmos tx emitted (0, 1, 2, …), NOT a Cosmos-message index. A single
+	// MsgExecutePayload can emit several derived EVM txs (deployUEA + … +
+	// executePayload), so MsgIndex routinely exceeds len(tx.GetMsgs()) and the old
+	// unconditional loop indexed past the message array and panicked
+	// (F-2026-17754). The in-tx predecessors of a derived target are assembled from
+	// the Cosmos tx's events in the derived-tx block below, which is the correct
+	// index domain, so this loop must be skipped for derived targets.
+	if additional == nil {
+		index := int(transaction.MsgIndex) // #nosec G115
+		for i := 0; i < index; i++ {
+			msg := tx.GetMsgs()[i]
+			// Check if it's a normal Ethereum tx
+			if ethMsg, ok := msg.(*evmtypes.MsgEthereumTx); ok {
+				predecessors = append(predecessors, ethMsg)
+				continue
+			}
 		}
 	}
 

@@ -651,11 +651,28 @@ func (suite *BackendTestSuite) TestTraceTransactionDerivedTargetInMultiDerivedCo
 		RegisterTxSearchEmpty(client, idxQuery)
 	}
 
-	// Tracing the 3rd derived EVM tx must not panic. On PR #27 it does: the after-loop runs
-	// `tx.GetMsgs()[0]` on the (0-message) Cosmos tx with transaction.MsgIndex=2.
+	// With the after-loop now skipped for derived targets, the derived block reconstructs the
+	// intra-slot predecessors (D0, D1) of D2 from slot-0 events instead.
+	RegisterBlockResultsWithTxs(client, 1, []*abci.ExecTxResult{
+		{Code: 0, Events: []abci.Event{
+			derivedTxEvt(hashD0.Hex(), 0, sender.Hex(), recipient.Hex(), gasLimit),
+			derivedTxEvt(hashD1.Hex(), 1, sender.Hex(), recipient.Hex(), gasLimit),
+			derivedTxEvt(hashD2.Hex(), 2, sender.Hex(), recipient.Hex(), gasLimit),
+		}},
+	})
+
+	queryClient := suite.mockQueryClient()
+	RegisterTraceTransactionWithPredecessors(queryClient, nil, nil)
+	RegisterConsensusParams(client, 1)
+
+	// Tracing the 3rd derived EVM tx must not panic and must succeed. On the buggy version it
+	// panics: the after-loop runs `tx.GetMsgs()[0]` on the (0-message) Cosmos tx with
+	// transaction.MsgIndex=2.
+	var traceErr error
 	suite.Require().NotPanics(func() {
-		_, _ = suite.backend.TraceTransaction(hashD2, nil)
+		_, traceErr = suite.backend.TraceTransaction(hashD2, nil)
 	}, "tracing the 3rd derived EVM tx of a multi-derived Cosmos tx must not panic (F-2026-17754)")
+	suite.Require().NoError(traceErr)
 }
 
 // TestTraceTransactionFirstDerivedTargetInMultiDerivedCosmosTx is the passing boundary to
