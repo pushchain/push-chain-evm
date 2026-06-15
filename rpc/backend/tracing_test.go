@@ -599,3 +599,61 @@ func (suite *BackendTestSuite) TestTraceTransactionDerivedTxAsTarget() {
 	_, err = suite.backend.TraceTransaction(hashDerivedTarget, nil)
 	suite.Require().NoError(err)
 }
+
+// TestTraceTransactionDerivedTargetInMultiDerivedCosmosTx proves the residual
+// Cosmos/Ethereum index-domain bug in the TraceTransaction after-loop (F-2026-17754).
+//
+// A single Cosmos tx emits MULTIPLE derived EVM txs (e.g. deployUEA + … + executePayload),
+// so one Cosmos slot holds derived txs at MsgIndex 0,1,2,… while the Cosmos tx itself has
+// 0/1 actual messages. The after-loop iterates `tx.GetMsgs()[0:transaction.MsgIndex]`,
+// treating the DERIVED position as a COSMOS-message index — so tracing the 3rd derived tx
+// (MsgIndex=2) indexes past the Cosmos message array and panics.
+//
+// Block layout: slot0 = one non-EVM Cosmos tx that produced 3 derived EVM txs.
+// EthTxIndex:   D0=0, D1=1, D2=2 (target); all share TxIndex=0, MsgIndex=0/1/2.
+func (suite *BackendTestSuite) TestTraceTransactionDerivedTargetInMultiDerivedCosmosTx() {
+	suite.SetupTest()
+
+	// One non-EVM Cosmos tx (no embedded MsgEthereumTx) that produced 3 derived EVM txs.
+	dummyTxBz, err := suite.backend.ClientCtx.TxConfig.TxEncoder()(
+		suite.backend.ClientCtx.TxConfig.NewTxBuilder().GetTx(),
+	)
+	suite.Require().NoError(err)
+
+	sender := common.HexToAddress("0x1234567890abcdef1234567890abcdef12345678")
+	recipient := common.HexToAddress("0xabcdef1234567890abcdef1234567890abcdef12")
+	gasLimit := uint64(50000)
+	hashD0 := common.HexToHash("0xaa00000000000000000000000000000000000000000000000000000000000000")
+	hashD1 := common.HexToHash("0xbb00000000000000000000000000000000000000000000000000000000000000")
+	hashD2 := common.HexToHash("0xcc00000000000000000000000000000000000000000000000000000000000000") // target (3rd derived)
+
+	// Empty indexer → lookups fall through to CometBFT TxSearch.
+	suite.backend.Indexer = indexer.NewKVIndexer(dbm.NewMemDB(), log.NewNopLogger(), suite.backend.ClientCtx)
+
+	client := suite.mockClient()
+	_, err = RegisterBlockMultipleTxs(client, 1, []types.Tx{dummyTxBz}) // single Cosmos slot
+	suite.Require().NoError(err)
+
+	// GetTxByEthHash(D2): all 3 derived events are in slot 0; D2 is the 3rd → MsgIndex=2, EthTxIndex=2.
+	targetQuery := fmt.Sprintf("%s.%s='%s'",
+		evmtypes.TypeMsgEthereumTx, evmtypes.AttributeKeyEthereumTxHash, hashD2.Hex())
+	RegisterTxSearchWithResult(client, targetQuery, 1, 0, nil, []abci.Event{
+		derivedTxEvt(hashD0.Hex(), 0, sender.Hex(), recipient.Hex(), gasLimit),
+		derivedTxEvt(hashD1.Hex(), 1, sender.Hex(), recipient.Hex(), gasLimit),
+		derivedTxEvt(hashD2.Hex(), 2, sender.Hex(), recipient.Hex(), gasLimit),
+	})
+
+	// Outer predecessor loop runs for eth-indices 0 and 1; let those miss (they live in the
+	// target's own Cosmos slot and are skipped anyway). The panic is in the after-loop.
+	for i := 0; i < 2; i++ {
+		idxQuery := fmt.Sprintf("tx.height=%d AND %s.%s=%d",
+			1, evmtypes.TypeMsgEthereumTx, evmtypes.AttributeKeyTxIndex, i)
+		RegisterTxSearchEmpty(client, idxQuery)
+	}
+
+	// Tracing the 3rd derived EVM tx must not panic. On PR #27 it does: the after-loop runs
+	// `tx.GetMsgs()[0]` on the (0-message) Cosmos tx with transaction.MsgIndex=2.
+	suite.Require().NotPanics(func() {
+		_, _ = suite.backend.TraceTransaction(hashD2, nil)
+	}, "tracing the 3rd derived EVM tx of a multi-derived Cosmos tx must not panic (F-2026-17754)")
+}
