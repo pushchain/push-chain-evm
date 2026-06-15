@@ -49,14 +49,21 @@ func (b *Backend) GetTransactionByHash(txHash common.Hash) (*rpctypes.RPCTransac
 
 	var ethMsg *evmtypes.MsgEthereumTx
 	if additional == nil {
-		// #nosec G115 always in range
+		if int(res.TxIndex) >= len(block.Block.Txs) { //nolint:gosec // G115
+			return nil, fmt.Errorf("tx index %d out of range for block with %d txs", res.TxIndex, len(block.Block.Txs))
+		}
 		tx, err := b.ClientCtx.TxConfig.TxDecoder()(block.Block.Txs[res.TxIndex])
 		if err != nil {
 			b.Logger.Debug("decoding failed", "error", err.Error())
 			return nil, fmt.Errorf("failed to decode tx: %w", err)
 		}
-		ethMsg = tx.GetMsgs()[res.MsgIndex].(*evmtypes.MsgEthereumTx)
-		if ethMsg == nil {
+		msgs := tx.GetMsgs()
+		if int(res.MsgIndex) >= len(msgs) { //nolint:gosec // G115
+			return nil, fmt.Errorf("msg index %d out of range for tx with %d msgs", res.MsgIndex, len(msgs))
+		}
+		var ok bool
+		ethMsg, ok = msgs[res.MsgIndex].(*evmtypes.MsgEthereumTx)
+		if !ok || ethMsg == nil {
 			b.Logger.Error("failed to get eth msg from sdk.Msgs")
 			return nil, fmt.Errorf("failed to get eth msg from sdk.Msgs")
 		}
@@ -238,7 +245,17 @@ func (b *Backend) GetTransactionReceipt(hash common.Hash) (map[string]interface{
 		return nil, fmt.Errorf("failed to get sender: %w", err)
 	}
 
-	return rpctypes.RPCMarshalReceipt(receipts[0], ethTx, from)
+	result, err := rpctypes.RPCMarshalReceipt(receipts[0], ethTx, from)
+	if err != nil {
+		return nil, err
+	}
+	// RPCMarshalReceipt computes transactionHash from ethTx.Hash(), which for derived
+	// txs is the reconstructed LegacyTx hash — different from the event-emitted hash.
+	// Override so eth_getTransactionReceipt agrees with eth_getTransactionByHash.
+	if additional != nil {
+		result["transactionHash"] = additional.Hash
+	}
+	return result, nil
 }
 
 // GetTransactionLogs returns the transaction logs identified by hash.

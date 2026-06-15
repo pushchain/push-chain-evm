@@ -555,7 +555,8 @@ func (k Keeper) TraceTx(c context.Context, req *types.QueryTraceTxRequest) (*typ
 				continue
 			}
 		} else {
-			derivedMsg := unsignedTxAsMessage(common.BytesToAddress(req.Msg.GetFrom()), ethTx, cfg.BaseFee)
+			// Use this predecessor's own From address, not the target tx's From.
+			derivedMsg := unsignedTxAsMessage(common.BytesToAddress(tx.GetFrom()), ethTx, cfg.BaseFee)
 			msg = &derivedMsg
 		}
 		msg.GasLimit = min(msg.GasLimit, maxPredecessorGas)

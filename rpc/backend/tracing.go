@@ -6,7 +6,6 @@ import (
 	"math"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/pkg/errors"
 
 	tmrpcclient "github.com/cometbft/cometbft/rpc/client"
@@ -44,7 +43,7 @@ func (b *Backend) TraceTransaction(hash common.Hash, config *rpctypes.TraceConfi
 		return nil, fmt.Errorf("tx count %d is overflowing", len(blk.Block.Txs))
 	}
 	txsLen := uint32(len(blk.Block.Txs)) // #nosec G115 -- checked for int overflow already
-	if txsLen < transaction.TxIndex {
+	if txsLen <= transaction.TxIndex {
 		b.Logger.Debug("tx index out of bounds", "index", transaction.TxIndex, "hash", hash.String(), "height", blk.Block.Height)
 		return nil, fmt.Errorf("transaction not included in block %v", blk.Block.Height)
 	}
@@ -246,11 +245,7 @@ func (b *Backend) TraceBlock(height rpctypes.BlockNumber,
 	config *rpctypes.TraceConfig,
 	block *tmrpctypes.ResultBlock,
 ) ([]*evmtypes.TxTraceResult, error) {
-	txs := block.Block.Txs
-	txsLength := len(txs)
-
-	if txsLength == 0 {
-		// If there are no transactions return empty array
+	if len(block.Block.Txs) == 0 {
 		return []*evmtypes.TxTraceResult{}, nil
 	}
 
@@ -259,28 +254,11 @@ func (b *Backend) TraceBlock(height rpctypes.BlockNumber,
 		b.Logger.Debug("block result not found", "height", block.Block.Height, "error", err.Error())
 		return nil, nil
 	}
-	txDecoder := b.ClientCtx.TxConfig.TxDecoder()
 
-	var txsMessages []*evmtypes.MsgEthereumTx
-	for i, tx := range txs {
-		if !rpctypes.TxSucessOrExpectedFailure(blockRes.TxsResults[i]) {
-			b.Logger.Debug("invalid tx result code", "cosmos-hash", hexutil.Encode(tx.Hash()))
-			continue
-		}
-		decodedTx, err := txDecoder(tx)
-		if err != nil {
-			b.Logger.Error("failed to decode transaction", "hash", txs[i].Hash(), "error", err.Error())
-			continue
-		}
-
-		for _, msg := range decodedTx.GetMsgs() {
-			ethMessage, ok := msg.(*evmtypes.MsgEthereumTx)
-			if !ok {
-				// Just considers Ethereum transactions
-				continue
-			}
-			txsMessages = append(txsMessages, ethMessage)
-		}
+	// EthMsgsFromCometBlock returns both native MsgEthereumTx and derived txs.
+	txsMessages, _ := b.EthMsgsFromCometBlock(block, blockRes)
+	if len(txsMessages) == 0 {
+		return []*evmtypes.TxTraceResult{}, nil
 	}
 
 	// minus one to get the context at the beginning of the block
@@ -317,7 +295,7 @@ func (b *Backend) TraceBlock(height rpctypes.BlockNumber,
 		return nil, err
 	}
 
-	decodedResults := make([]*evmtypes.TxTraceResult, txsLength)
+	decodedResults := make([]*evmtypes.TxTraceResult, len(txsMessages))
 	if err := json.Unmarshal(res.Data, &decodedResults); err != nil {
 		return nil, err
 	}
