@@ -10,7 +10,7 @@ import (
 
 	dbm "github.com/cosmos/cosmos-db"
 	rpctypes "github.com/cosmos/evm/rpc/types"
-	cosmosevmtypes "github.com/cosmos/evm/types"
+	servertypes "github.com/cosmos/evm/server/types"
 	evmtypes "github.com/cosmos/evm/x/vm/types"
 
 	errorsmod "cosmossdk.io/errors"
@@ -34,7 +34,7 @@ const (
 	TxIndexKeyLength = 1 + 8 + 8
 )
 
-var _ cosmosevmtypes.EVMTxIndexer = &KVIndexer{}
+var _ servertypes.EVMTxIndexer = &KVIndexer{}
 
 // KVIndexer implements a eth tx indexer on a KV db.
 type KVIndexer struct {
@@ -54,7 +54,7 @@ func NewKVIndexer(db dbm.DB, logger log.Logger, clientCtx client.Context) *KVInd
 // - Iterates over all the messages of the Tx
 // - Builds and stores a indexer.TxResult based on parsed events for every message
 func (kv *KVIndexer) IndexBlock(block *cmttypes.Block, txResults []*abci.ExecTxResult) error {
-	height := block.Header.Height
+	height := block.Height
 
 	batch := kv.db.NewBatch()
 	defer batch.Close()
@@ -76,10 +76,10 @@ func (kv *KVIndexer) IndexBlock(block *cmttypes.Block, txResults []*abci.ExecTxR
 		if !isEthTx(tx) {
 			// Derived txs (internal EVM executions emitted only as events, not as an
 			// embedded MsgEthereumTx) still occupy slots in the block's eth-tx index
-			// sequence (#18). Index them by hash and by (height, ethTxIndex), advancing
+			// sequence. Index them by hash and by (height, ethTxIndex), advancing
 			// the shared ethTxIndex so it stays aligned with the emitted txIndex for any
 			// standard eth txs that follow in the same block.
-			ethTxIndex, err = kv.indexDerivedTxs(batch, height, uint32(txIndex), result, ethTxIndex) //#nosec G115 -- int overflow is not a concern here
+			ethTxIndex, err = kv.indexDerivedTxs(batch, height, uint32(txIndex), result, ethTxIndex) //#nosec G115
 			if err != nil {
 				kv.logger.Error("Fail to index derived txs", "err", err, "block", height, "txIndex", txIndex)
 			}
@@ -95,9 +95,9 @@ func (kv *KVIndexer) IndexBlock(block *cmttypes.Block, txResults []*abci.ExecTxR
 		var cumulativeGasUsed uint64
 		for msgIndex, msg := range tx.GetMsgs() {
 			ethMsg := msg.(*evmtypes.MsgEthereumTx)
-			txHash := common.HexToHash(ethMsg.Hash)
+			txHash := ethMsg.Hash()
 
-			txResult := cosmosevmtypes.TxResult{
+			txResult := servertypes.TxResult{
 				Height:     height,
 				TxIndex:    uint32(txIndex),  //#nosec G115 -- int overflow is not a concern here
 				MsgIndex:   uint32(msgIndex), //#nosec G115 -- int overflow is not a concern here
@@ -170,7 +170,7 @@ func (kv *KVIndexer) indexDerivedTxs(
 		}
 
 		cumulativeGasUsed += parsed.GasUsed
-		txResult := cosmosevmtypes.TxResult{
+		txResult := servertypes.TxResult{
 			Height:            height,
 			TxIndex:           txIndex,
 			MsgIndex:          uint32(parsed.MsgIndex), //#nosec G115 -- int overflow is not a concern here
@@ -205,7 +205,7 @@ func (kv *KVIndexer) FirstIndexedBlock() (int64, error) {
 }
 
 // GetByTxHash finds eth tx by eth tx hash
-func (kv *KVIndexer) GetByTxHash(hash common.Hash) (*cosmosevmtypes.TxResult, error) {
+func (kv *KVIndexer) GetByTxHash(hash common.Hash) (*servertypes.TxResult, error) {
 	bz, err := kv.db.Get(TxHashKey(hash))
 	if err != nil {
 		return nil, errorsmod.Wrapf(err, "GetByTxHash %s", hash.Hex())
@@ -213,7 +213,7 @@ func (kv *KVIndexer) GetByTxHash(hash common.Hash) (*cosmosevmtypes.TxResult, er
 	if len(bz) == 0 {
 		return nil, fmt.Errorf("tx not found, hash: %s", hash.Hex())
 	}
-	var txKey cosmosevmtypes.TxResult
+	var txKey servertypes.TxResult
 	if err := kv.clientCtx.Codec.Unmarshal(bz, &txKey); err != nil {
 		return nil, errorsmod.Wrapf(err, "GetByTxHash %s", hash.Hex())
 	}
@@ -232,7 +232,7 @@ func (kv *KVIndexer) IsDerivedTx(hash common.Hash) (bool, error) {
 }
 
 // GetByBlockAndIndex finds eth tx by block number and eth tx index
-func (kv *KVIndexer) GetByBlockAndIndex(blockNumber int64, txIndex int32) (*cosmosevmtypes.TxResult, error) {
+func (kv *KVIndexer) GetByBlockAndIndex(blockNumber int64, txIndex int32) (*servertypes.TxResult, error) {
 	bz, err := kv.db.Get(TxIndexKey(blockNumber, txIndex))
 	if err != nil {
 		return nil, errorsmod.Wrapf(err, "GetByBlockAndIndex %d %d", blockNumber, txIndex)
@@ -315,7 +315,7 @@ func isEthTx(tx sdk.Tx) bool {
 }
 
 // saveTxResult index the txResult into the kv db batch
-func saveTxResult(codec codec.Codec, batch dbm.Batch, txHash common.Hash, txResult *cosmosevmtypes.TxResult) error {
+func saveTxResult(codec codec.Codec, batch dbm.Batch, txHash common.Hash, txResult *servertypes.TxResult) error {
 	bz := codec.MustMarshal(txResult)
 	if err := batch.Set(TxHashKey(txHash), bz); err != nil {
 		return errorsmod.Wrap(err, "set tx-hash key")

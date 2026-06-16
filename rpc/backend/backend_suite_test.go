@@ -1,41 +1,51 @@
 package backend
 
 import (
-	"bufio"
 	"math/big"
 	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
 	ethtypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/stretchr/testify/suite"
 
-	cmtrpctypes "github.com/cometbft/cometbft/rpc/core/types"
-
 	dbm "github.com/cosmos/cosmos-db"
-	"github.com/cosmos/evm/crypto/hd"
-	"github.com/cosmos/evm/encoding"
 	"github.com/cosmos/evm/indexer"
 	"github.com/cosmos/evm/rpc/backend/mocks"
-	rpctypes "github.com/cosmos/evm/rpc/types"
 	"github.com/cosmos/evm/testutil/constants"
-	testnetwork "github.com/cosmos/evm/testutil/integration/os/network"
 	utiltx "github.com/cosmos/evm/testutil/tx"
 	evmtypes "github.com/cosmos/evm/x/vm/types"
 
-	"github.com/cosmos/cosmos-sdk/client"
+	codectypes "github.com/cosmos/cosmos-sdk/codec/types"
 	"github.com/cosmos/cosmos-sdk/crypto/keyring"
-	"github.com/cosmos/cosmos-sdk/server"
 	sdk "github.com/cosmos/cosmos-sdk/types"
+	authtx "github.com/cosmos/cosmos-sdk/x/auth/tx"
+
+	"cosmossdk.io/log"
 )
 
+// TestMain initializes the global EVM chain config required by NewBackend.
+// Without this, GetEthChainConfig() panics on a nil dereference.
+func TestMain(m *testing.M) {
+	configurator := evmtypes.NewEVMConfigurator()
+	configurator.ResetTestConfig()
+	ethCfg := evmtypes.DefaultChainConfig(constants.ExampleChainID.EVMChainID)
+	if err := evmtypes.SetChainConfig(ethCfg); err != nil {
+		panic(err)
+	}
+	coinInfo := constants.ExampleChainCoinInfo[constants.ExampleChainID]
+	if err := evmtypes.NewEVMConfigurator().
+		WithEVMCoinInfo(coinInfo).
+		Configure(); err != nil {
+		panic(err)
+	}
+	os.Exit(m.Run())
+}
+
+// BackendTestSuite wraps setupMockBackend and adds helpers used by TraceTransaction tests.
 type BackendTestSuite struct {
 	suite.Suite
-
 	backend *Backend
-	from    common.Address
-	acc     sdk.AccAddress
 	signer  keyring.Signer
 }
 
@@ -43,153 +53,96 @@ func TestBackendTestSuite(t *testing.T) {
 	suite.Run(t, new(BackendTestSuite))
 }
 
-var ChainID = constants.ExampleChainID
-
-// SetupTest is executed before every BackendTestSuite test
 func (suite *BackendTestSuite) SetupTest() {
-	ctx := server.NewDefaultContext()
-	ctx.Viper.Set("telemetry.global-labels", []interface{}{})
-
-	baseDir := suite.T().TempDir()
-	nodeDirName := "node"
-	clientDir := filepath.Join(baseDir, nodeDirName, "evmoscli")
-	keyRing, err := suite.generateTestKeyring(clientDir)
-	if err != nil {
-		panic(err)
-	}
-
-	// Create Account with set sequence
-	suite.acc = sdk.AccAddress(utiltx.GenerateAddress().Bytes())
-	accounts := map[string]client.TestAccount{}
-	accounts[suite.acc.String()] = client.TestAccount{
-		Address: suite.acc,
-		Num:     uint64(1),
-		Seq:     uint64(1),
-	}
-
-	from, priv := utiltx.NewAddrKey()
-	suite.from = from
+	suite.backend = setupMockBackend(suite.T())
+	_, priv := utiltx.NewAddrKey()
 	suite.signer = utiltx.NewSigner(priv)
-	suite.Require().NoError(err)
-
-	nw := testnetwork.New()
-	encodingConfig := nw.GetEncodingConfig()
-	clientCtx := client.Context{}.WithChainID(ChainID).
-		WithHeight(1).
-		WithTxConfig(encodingConfig.TxConfig).
-		WithKeyringDir(clientDir).
-		WithKeyring(keyRing).
-		WithAccountRetriever(client.TestAccountRetriever{Accounts: accounts}).
-		WithClient(mocks.NewClient(suite.T()))
-
-	allowUnprotectedTxs := false
-	idxer := indexer.NewKVIndexer(dbm.NewMemDB(), ctx.Logger, clientCtx)
-
-	suite.backend = NewBackend(ctx, ctx.Logger, clientCtx, allowUnprotectedTxs, idxer)
-	suite.backend.cfg.JSONRPC.GasCap = 0
-	suite.backend.cfg.JSONRPC.EVMTimeout = 0
-	suite.backend.cfg.JSONRPC.AllowInsecureUnlock = true
-	suite.backend.queryClient.QueryClient = mocks.NewEVMQueryClient(suite.T())
-	suite.backend.queryClient.FeeMarket = mocks.NewFeeMarketQueryClient(suite.T())
-	suite.backend.ctx = rpctypes.ContextWithHeight(1)
-
-	// Add codec
-	suite.backend.clientCtx.Codec = encodingConfig.Codec
 }
 
-// buildEthereumTx returns an example legacy Ethereum transaction
+// buildEthereumTx returns an unsigned legacy EVM tx and its pre-encoded bytes.
+// From is left empty; call signAndEncodeEthTx for a fully signed single-msg tx.
 func (suite *BackendTestSuite) buildEthereumTx() (*evmtypes.MsgEthereumTx, []byte) {
 	ethTxParams := evmtypes.EvmTxArgs{
-		ChainID:  suite.backend.chainID,
-		Nonce:    uint64(0),
+		ChainID:  suite.backend.EvmChainID,
+		Nonce:    0,
 		To:       &common.Address{},
 		Amount:   big.NewInt(0),
 		GasLimit: 100000,
 		GasPrice: big.NewInt(1),
 	}
-	msgEthereumTx := evmtypes.NewTx(&ethTxParams)
+	msg := evmtypes.NewTx(&ethTxParams)
 
-	// A valid msg should have empty `From`
-	msgEthereumTx.From = suite.from.Hex()
-
-	txBuilder := suite.backend.clientCtx.TxConfig.NewTxBuilder()
-	err := txBuilder.SetMsgs(msgEthereumTx)
+	txBuilder := suite.backend.ClientCtx.TxConfig.NewTxBuilder()
+	suite.Require().NoError(txBuilder.SetMsgs(msg))
+	bz, err := suite.backend.ClientCtx.TxConfig.TxEncoder()(txBuilder.GetTx())
 	suite.Require().NoError(err)
-
-	bz, err := suite.backend.clientCtx.TxConfig.TxEncoder()(txBuilder.GetTx())
-	suite.Require().NoError(err)
-	return msgEthereumTx, bz
+	return msg, bz
 }
 
-// buildFormattedBlock returns a formatted block for testing
-func (suite *BackendTestSuite) buildFormattedBlock(
-	blockRes *cmtrpctypes.ResultBlockResults,
-	resBlock *cmtrpctypes.ResultBlock,
-	fullTx bool,
-	tx *evmtypes.MsgEthereumTx,
-	validator sdk.AccAddress,
-	baseFee *big.Int,
-) map[string]interface{} {
-	header := resBlock.Block.Header
-	gasLimit := int64(^uint32(0))                                             // for `MaxGas = -1` (DefaultConsensusParams)
-	gasUsed := new(big.Int).SetUint64(uint64(blockRes.TxsResults[0].GasUsed)) //nolint:gosec // G115 // won't exceed uint64
+// signAndEncodeEthTx signs msg with a fresh ephemeral key and encodes it as a
+// single-message Cosmos tx. The msg.From field is updated in-place; hashes
+// computed via msg.AsTransaction().Hash() are valid after this returns.
+func (suite *BackendTestSuite) signAndEncodeEthTx(msg *evmtypes.MsgEthereumTx) []byte {
+	from, priv := utiltx.NewAddrKey()
+	signer := utiltx.NewSigner(priv)
+	ethSigner := ethtypes.LatestSigner(suite.backend.ChainConfig())
+	msg.From = from.Bytes()
+	suite.Require().NoError(msg.Sign(ethSigner, signer))
 
-	root := common.Hash{}.Bytes()
-	receipt := ethtypes.NewReceipt(root, false, gasUsed.Uint64())
-	bloom := ethtypes.CreateBloom(ethtypes.Receipts{receipt})
+	evmDenom := evmtypes.GetEVMCoinDenom()
+	tx, err := msg.BuildTx(suite.backend.ClientCtx.TxConfig.NewTxBuilder(), evmDenom)
+	suite.Require().NoError(err)
+	txBz, err := suite.backend.ClientCtx.TxConfig.TxEncoder()(tx)
+	suite.Require().NoError(err)
+	return txBz
+}
 
-	ethRPCTxs := []interface{}{}
-	if tx != nil {
-		if fullTx {
-			rpcTx, err := rpctypes.NewRPCTransaction(
-				tx.AsTransaction(),
-				common.BytesToHash(header.Hash()),
-				uint64(header.Height), //nolint:gosec // G115 // won't exceed uint64
-				uint64(0),
-				baseFee,
-				suite.backend.chainID,
-			)
-			suite.Require().NoError(err)
-			ethRPCTxs = []interface{}{rpcTx}
-		} else {
-			ethRPCTxs = []interface{}{common.HexToHash(tx.Hash)}
-		}
+// buildAndEncodeMultiMsgEthTx builds a single EVM Cosmos tx containing multiple
+// MsgEthereumTx messages. Each message is signed with a fresh ephemeral key so
+// their hashes are unique even when underlying tx params are identical.
+func (suite *BackendTestSuite) buildAndEncodeMultiMsgEthTx(msgs ...*evmtypes.MsgEthereumTx) []byte {
+	ethSigner := ethtypes.LatestSigner(suite.backend.ChainConfig())
+	for _, msg := range msgs {
+		from, priv := utiltx.NewAddrKey()
+		signer := utiltx.NewSigner(priv)
+		msg.From = from.Bytes()
+		suite.Require().NoError(msg.Sign(ethSigner, signer))
+		msg.From = nil // BuildTx expects empty From for multi-msg txs
 	}
 
-	return rpctypes.FormatBlock(
-		header,
-		resBlock.Block.Size(),
-		gasLimit,
-		gasUsed,
-		ethRPCTxs,
-		bloom,
-		common.BytesToAddress(validator.Bytes()),
-		baseFee,
+	extBuilder, ok := suite.backend.ClientCtx.TxConfig.NewTxBuilder().(authtx.ExtensionOptionsTxBuilder)
+	suite.Require().True(ok)
+
+	option, err := codectypes.NewAnyWithValue(&evmtypes.ExtensionOptionsEthereumTx{})
+	suite.Require().NoError(err)
+	extBuilder.SetExtensionOptions(option)
+
+	sdkMsgs := make([]sdk.Msg, len(msgs))
+	for i, msg := range msgs {
+		sdkMsgs[i] = msg
+	}
+	suite.Require().NoError(extBuilder.SetMsgs(sdkMsgs...))
+
+	bz, err := suite.backend.ClientCtx.TxConfig.TxEncoder()(extBuilder.GetTx())
+	suite.Require().NoError(err)
+	return bz
+}
+
+// resetIndexer creates a fresh KV indexer and installs it on the backend.
+func (suite *BackendTestSuite) resetIndexer() {
+	suite.backend.Indexer = indexer.NewKVIndexer(
+		dbm.NewMemDB(),
+		log.NewNopLogger(),
+		suite.backend.ClientCtx,
 	)
 }
 
-func (suite *BackendTestSuite) generateTestKeyring(clientDir string) (keyring.Keyring, error) {
-	buf := bufio.NewReader(os.Stdin)
-	encCfg := encoding.MakeConfig()
-	return keyring.New(sdk.KeyringServiceName(), keyring.BackendTest, clientDir, buf, encCfg.Codec, []keyring.Option{hd.EthSecp256k1Option()}...)
+// mockClient returns the mock CometBFT client used by this backend.
+func (suite *BackendTestSuite) mockClient() *mocks.Client {
+	return suite.backend.ClientCtx.Client.(*mocks.Client)
 }
 
-func (suite *BackendTestSuite) signAndEncodeEthTx(msgEthereumTx *evmtypes.MsgEthereumTx) []byte {
-	from, priv := utiltx.NewAddrKey()
-	signer := utiltx.NewSigner(priv)
-
-	ethSigner := ethtypes.LatestSigner(suite.backend.ChainConfig())
-	msgEthereumTx.From = from.String()
-	err := msgEthereumTx.Sign(ethSigner, signer)
-	suite.Require().NoError(err)
-
-	evmDenom := evmtypes.GetEVMCoinDenom()
-	tx, err := msgEthereumTx.BuildTx(suite.backend.clientCtx.TxConfig.NewTxBuilder(), evmDenom)
-	suite.Require().NoError(err)
-
-	txEncoder := suite.backend.clientCtx.TxConfig.TxEncoder()
-	txBz, err := txEncoder(tx)
-	suite.Require().NoError(err)
-
-	return txBz
+// mockQueryClient returns the mock EVM gRPC query client used by this backend.
+func (suite *BackendTestSuite) mockQueryClient() *mocks.EVMQueryClient {
+	return suite.backend.QueryClient.QueryClient.(*mocks.EVMQueryClient)
 }

@@ -2,6 +2,7 @@ package backend
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/cosmos/evm/rpc/backend/mocks"
 	rpc "github.com/cosmos/evm/rpc/types"
+	"github.com/cosmos/evm/testutil/constants"
 	evmtypes "github.com/cosmos/evm/x/vm/types"
 
 	"github.com/cosmos/cosmos-sdk/client"
@@ -26,14 +28,13 @@ import (
 	authtypes "github.com/cosmos/cosmos-sdk/x/auth/types"
 )
 
-// Client defines a mocked object that implements the Tendermint JSON-RPC Client
-// interface. It allows for performing Client queries without having to run a
-// Tendermint RPC Client server.
-//
-// To use a mock method it has to be registered in a given test.
 var _ cmtrpcclient.Client = &mocks.Client{}
 
+// ChainID is the chain ID string used by block-level mock helpers.
+var ChainID = constants.ExampleChainID.ChainID
+
 // Tx Search
+
 func RegisterTxSearch(client *mocks.Client, query string, txBz []byte) {
 	resulTxs := []*cmtrpctypes.ResultTx{{Tx: txBz}}
 	client.On("TxSearch", rpc.ContextWithHeight(1), query, false, (*int)(nil), (*int)(nil), "").
@@ -45,52 +46,38 @@ func RegisterTxSearchEmpty(client *mocks.Client, query string) {
 		Return(&cmtrpctypes.ResultTxSearch{}, nil)
 }
 
+// RegisterTxSearchWithResult registers a TxSearch mock that returns a single ResultTx
+// with explicit raw tx bytes (nil for derived txs with no Cosmos envelope), block height,
+// Cosmos-tx-slot index, and ABCI events. Needed when the KV indexer has no entry and
+// code falls through to CometBFT TxSearch.
+func RegisterTxSearchWithResult(
+	client *mocks.Client,
+	query string,
+	height int64,
+	txSlot uint32,
+	txBz types.Tx,
+	events []abci.Event,
+) {
+	resultTx := &cmtrpctypes.ResultTx{
+		Height: height,
+		Index:  txSlot,
+		Tx:     txBz,
+		TxResult: abci.ExecTxResult{
+			Code:   0,
+			Events: events,
+		},
+	}
+	client.On("TxSearch", rpc.ContextWithHeight(1), query, false, (*int)(nil), (*int)(nil), "").
+		Return(&cmtrpctypes.ResultTxSearch{Txs: []*cmtrpctypes.ResultTx{resultTx}, TotalCount: 1}, nil)
+}
+
 func RegisterTxSearchError(client *mocks.Client, query string) {
 	client.On("TxSearch", rpc.ContextWithHeight(1), query, false, (*int)(nil), (*int)(nil), "").
 		Return(nil, errortypes.ErrInvalidRequest)
 }
 
-// Broadcast Tx
-func RegisterBroadcastTx(client *mocks.Client, tx types.Tx) {
-	client.On("BroadcastTxSync", context.Background(), tx).
-		Return(&cmtrpctypes.ResultBroadcastTx{}, nil)
-}
-
-func RegisterBroadcastTxError(client *mocks.Client, tx types.Tx) {
-	client.On("BroadcastTxSync", context.Background(), tx).
-		Return(nil, errortypes.ErrInvalidRequest)
-}
-
-// Unconfirmed Transactions
-func RegisterUnconfirmedTxs(client *mocks.Client, limit *int, txs []types.Tx) {
-	client.On("UnconfirmedTxs", rpc.ContextWithHeight(1), limit).
-		Return(&cmtrpctypes.ResultUnconfirmedTxs{Txs: txs}, nil)
-}
-
-func RegisterUnconfirmedTxsEmpty(client *mocks.Client, limit *int) {
-	client.On("UnconfirmedTxs", rpc.ContextWithHeight(1), limit).
-		Return(&cmtrpctypes.ResultUnconfirmedTxs{
-			Txs: make([]types.Tx, 2),
-		}, nil)
-}
-
-func RegisterUnconfirmedTxsError(client *mocks.Client, limit *int) {
-	client.On("UnconfirmedTxs", rpc.ContextWithHeight(1), limit).
-		Return(nil, errortypes.ErrInvalidRequest)
-}
-
-// Status
-func RegisterStatus(client *mocks.Client) {
-	client.On("Status", rpc.ContextWithHeight(1)).
-		Return(&cmtrpctypes.ResultStatus{}, nil)
-}
-
-func RegisterStatusError(client *mocks.Client) {
-	client.On("Status", rpc.ContextWithHeight(1)).
-		Return(nil, errortypes.ErrInvalidRequest)
-}
-
 // Block
+
 func RegisterBlockMultipleTxs(
 	client *mocks.Client,
 	height int64,
@@ -108,7 +95,6 @@ func RegisterBlock(
 	height int64,
 	tx []byte,
 ) (*cmtrpctypes.ResultBlock, error) {
-	// without tx
 	if tx == nil {
 		emptyBlock := types.MakeBlock(height, []types.Tx{}, nil, nil)
 		emptyBlock.ChainID = ChainID
@@ -116,8 +102,6 @@ func RegisterBlock(
 		client.On("Block", rpc.ContextWithHeight(height), mock.AnythingOfType("*int64")).Return(resBlock, nil)
 		return resBlock, nil
 	}
-
-	// with tx
 	block := types.MakeBlock(height, []types.Tx{tx}, nil, nil)
 	block.ChainID = ChainID
 	resBlock := &cmtrpctypes.ResultBlock{Block: block}
@@ -125,21 +109,9 @@ func RegisterBlock(
 	return resBlock, nil
 }
 
-// Block returns error
 func RegisterBlockError(client *mocks.Client, height int64) {
 	client.On("Block", rpc.ContextWithHeight(height), mock.AnythingOfType("*int64")).
 		Return(nil, errortypes.ErrInvalidRequest)
-}
-
-// Block not found
-func RegisterBlockNotFound(
-	client *mocks.Client,
-	height int64,
-) (*cmtrpctypes.ResultBlock, error) {
-	client.On("Block", rpc.ContextWithHeight(height), mock.AnythingOfType("*int64")).
-		Return(&cmtrpctypes.ResultBlock{Block: nil}, nil)
-
-	return &cmtrpctypes.ResultBlock{Block: nil}, nil
 }
 
 func TestRegisterBlock(t *testing.T) {
@@ -158,6 +130,7 @@ func TestRegisterBlock(t *testing.T) {
 }
 
 // ConsensusParams
+
 func RegisterConsensusParams(client *mocks.Client, height int64) {
 	consensusParams := types.DefaultConsensusParams()
 	client.On("ConsensusParams", rpc.ContextWithHeight(height), mock.AnythingOfType("*int64")).
@@ -190,7 +163,7 @@ func RegisterBlockResultsWithEventLog(client *mocks.Client, height int64) (*cmtr
 				Type: evmtypes.EventTypeTxLog,
 				Attributes: []abci.EventAttribute{{
 					Key:   evmtypes.AttributeKeyTxLog,
-					Value: "{\"test\": \"hello\"}", // TODO refactor the value to unmarshall to a evmtypes.Log struct successfully
+					Value: "{\"test\": \"hello\"}",
 					Index: true,
 				}},
 			}}},
@@ -209,28 +182,26 @@ func RegisterBlockResults(
 		Height:     height,
 		TxsResults: []*abci.ExecTxResult{{Code: 0, GasUsed: 0}},
 	}
-
 	client.On("BlockResults", rpc.ContextWithHeight(height), mock.AnythingOfType("*int64")).
 		Return(res, nil)
 	return res, nil
 }
 
-// RegisterBlockResultsWithTxResults mocks BlockResults so it returns the supplied
-// per-tx results verbatim. Used to feed derived-tx events (ethereum_tx + message) that
-// the backend reparses to rebuild a derived tx's additional fields.
-func RegisterBlockResultsWithTxResults(
+// RegisterBlockResultsWithTxs registers a BlockResults mock with custom per-slot ABCI
+// results. Required when the after-loop derived-tx section in TraceTransaction fetches
+// BlockResults to scan for intra-slot derived-tx predecessor ordering.
+func RegisterBlockResultsWithTxs(
 	client *mocks.Client,
 	height int64,
 	txResults []*abci.ExecTxResult,
-) (*cmtrpctypes.ResultBlockResults, error) {
+) *cmtrpctypes.ResultBlockResults {
 	res := &cmtrpctypes.ResultBlockResults{
 		Height:     height,
 		TxsResults: txResults,
 	}
-
 	client.On("BlockResults", rpc.ContextWithHeight(height), mock.AnythingOfType("*int64")).
 		Return(res, nil)
-	return res, nil
+	return res
 }
 
 func RegisterBlockResultsError(client *mocks.Client, height int64) {
@@ -254,6 +225,7 @@ func TestRegisterBlockResults(t *testing.T) {
 }
 
 // BlockByHash
+
 func RegisterBlockByHash(
 	client *mocks.Client,
 	_ common.Hash,
@@ -261,7 +233,6 @@ func RegisterBlockByHash(
 ) (*cmtrpctypes.ResultBlock, error) {
 	block := types.MakeBlock(1, []types.Tx{tx}, nil, nil)
 	resBlock := &cmtrpctypes.ResultBlock{Block: block}
-
 	client.On("BlockByHash", rpc.ContextWithHeight(1), []byte{0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0}).
 		Return(resBlock, nil)
 	return resBlock, nil
@@ -272,12 +243,8 @@ func RegisterBlockByHashError(client *mocks.Client, _ common.Hash, _ []byte) {
 		Return(nil, errortypes.ErrInvalidRequest)
 }
 
-func RegisterBlockByHashNotFound(client *mocks.Client, _ common.Hash, _ []byte) {
-	client.On("BlockByHash", rpc.ContextWithHeight(1), []byte{0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0}).
-		Return(nil, nil)
-}
-
 // HeaderByHash
+
 func RegisterHeaderByHash(
 	client *mocks.Client,
 	_ common.Hash,
@@ -287,10 +254,7 @@ func RegisterHeaderByHash(
 		Version: cmtversion.Consensus{Block: version.BlockProtocol, App: 0},
 		Height:  1,
 	}
-	resHeader := &cmtrpctypes.ResultHeader{
-		Header: header,
-	}
-
+	resHeader := &cmtrpctypes.ResultHeader{Header: header}
 	client.On("HeaderByHash", rpc.ContextWithHeight(1), bytes.HexBytes{0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0}).
 		Return(resHeader, nil)
 	return resHeader, nil
@@ -301,16 +265,13 @@ func RegisterHeaderByHashError(client *mocks.Client, _ common.Hash, _ []byte) {
 		Return(nil, errortypes.ErrInvalidRequest)
 }
 
-func RegisterHeaderByHashNotFound(client *mocks.Client, _ common.Hash, _ []byte) {
-	client.On("HeaderByHash", rpc.ContextWithHeight(1), bytes.HexBytes{0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0}).
-		Return(nil, nil)
-}
+// ABCIQuery
 
 func RegisterABCIQueryWithOptions(client *mocks.Client, height int64, path string, data bytes.HexBytes, opts cmtrpcclient.ABCIQueryOptions) {
 	client.On("ABCIQueryWithOptions", context.Background(), path, data, opts).
 		Return(&cmtrpctypes.ResultABCIQuery{
 			Response: abci.ResponseQuery{
-				Value:  []byte{2}, // TODO replace with data.Bytes(),
+				Value:  []byte{2},
 				Height: height,
 			},
 		}, nil)
@@ -333,4 +294,30 @@ func RegisterABCIQueryAccount(clients *mocks.Client, data bytes.HexBytes, opts c
 				Height: 1,
 			},
 		}, nil)
+}
+
+// EVM query client helpers for tracing tests
+
+func RegisterTraceTransactionWithPredecessors(queryClient *mocks.EVMQueryClient, _ *evmtypes.MsgEthereumTx, _ []*evmtypes.MsgEthereumTx) {
+	data, _ := json.Marshal(map[string]interface{}{"test": "hello"})
+	queryClient.On("TraceTx", rpc.ContextWithHeight(1), mock.Anything).
+		Return(&evmtypes.QueryTraceTxResponse{Data: data}, nil)
+}
+
+func RegisterTraceTransaction(queryClient *mocks.EVMQueryClient, msgEthTx *evmtypes.MsgEthereumTx) {
+	RegisterTraceTransactionWithPredecessors(queryClient, msgEthTx, nil)
+}
+
+// RegisterTraceTransactionCapture mocks TraceTx with a fixed payload and captures the
+// request, so a test can assert the predecessor set TraceTransaction actually assembled
+// (the other helpers ignore it via mock.Anything).
+func RegisterTraceTransactionCapture(queryClient *mocks.EVMQueryClient, captured **evmtypes.QueryTraceTxRequest) {
+	data, _ := json.Marshal(map[string]interface{}{"test": "hello"})
+	queryClient.On("TraceTx", rpc.ContextWithHeight(1), mock.Anything).
+		Run(func(args mock.Arguments) {
+			if req, ok := args.Get(1).(*evmtypes.QueryTraceTxRequest); ok {
+				*captured = req
+			}
+		}).
+		Return(&evmtypes.QueryTraceTxResponse{Data: data}, nil)
 }
