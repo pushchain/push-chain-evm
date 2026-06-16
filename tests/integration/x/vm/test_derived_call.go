@@ -158,3 +158,34 @@ func (s *KeeperTestSuite) TestDerivedEVMCallWithDataGasless() {
 		"gasless derived call must report zero gas in its event")
 	s.Require().Greater(res.GasUsed, uint64(0), "the EVM still meters gas internally")
 }
+
+// TestDerivedEVMCallWithDataRevertDoesNotMutateBloom is a regression test for F-2026-17738
+// (a reverted derived execution must not mutate the block bloom) and the failure half of
+// F-2026-17736 (failed execution must not commit). An ERC20 transfer from a zero-balance
+// account reverts; the call must surface the error and leave the block bloom untouched.
+func (s *KeeperTestSuite) TestDerivedEVMCallWithDataRevertDoesNotMutateBloom() {
+	s.SetupTest()
+
+	erc20ABI := contracts.ERC20MinterBurnerDecimalsContract.ABI
+	wevmos := common.HexToAddress(testconstants.WEVMOSContractMainnet)
+	from := s.Keyring.GetAddr(0)
+	ctx := s.Network.GetContext()
+	keeper := s.Network.App.GetEVMKeeper()
+
+	bloomBefore := keeper.GetBlockBloomTransient(ctx).Bytes()
+
+	// transfer 1 token from a zero-balance account → ERC20 reverts.
+	data, err := erc20ABI.Pack("transfer", common.HexToAddress("0x000000000000000000000000000000000000dEaD"), big.NewInt(1))
+	s.Require().NoError(err)
+
+	res, err := keeper.DerivedEVMCallWithData(
+		ctx, from, &wevmos, data,
+		true, false, false, big.NewInt(0), big.NewInt(100_000), nil,
+	)
+	s.Require().Error(err, "a reverting derived call must surface an error")
+	s.Require().NotNil(res)
+	s.Require().True(res.Failed(), "the EVM execution reverted")
+
+	s.Require().Equal(bloomBefore, keeper.GetBlockBloomTransient(ctx).Bytes(),
+		"a reverted derived execution must not mutate the block bloom (F-2026-17738)")
+}
