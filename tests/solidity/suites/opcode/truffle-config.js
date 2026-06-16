@@ -11,7 +11,11 @@ module.exports = {
   },
   compilers: {
     solc: {
-      version: '0.5.17'
+      version: '0.5.17',
+      // Truffle 5.5.8's default solc download roots (relay.trufflesuite.com,
+      // solc-bin.ethereum.org, ethereum.github.io/solc-bin) are all dead, so
+      // point at the canonical Solidity binaries endpoint instead.
+      compilerRoots: ['https://binaries.soliditylang.org/bin/']
     }
   }
 }
