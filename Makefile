@@ -384,16 +384,19 @@ test-system: build-v05 build
 	cd tests/systemtests/Counter && forge build
 	$(MAKE) -C tests/systemtests test
 
-# V05_REF is the upstream v0.5.1 release tag — the "from" version for the
-# v0.5.0-to-v0.6.0 upgrade system test.
-V05_REF ?= v0.5.1
+# V05_REF is the fork's v0.5.x release state (the last commit before the v0.6.0
+# upgrade work began) — the "from" version for the v0.5.0-to-v0.6.0 upgrade
+# system test. A commit hash is used (not the upstream `v0.5.1` tag) because that
+# tag lives in cosmos/evm, not in this fork, so it is unavailable in CI even with
+# fetch-tags. Mirrors V04_REF.
+V05_REF ?= 96231e7a
 V05_WORKTREE ?= $(BUILDDIR)/v05-src
 build-v05:
 	mkdir -p ./tests/systemtests/binaries/v0.5
 	# Build the legacy binary in a throwaway worktree so the main checkout is
-	# never disturbed (the old recipe ran `git checkout v0.5.1` on the working
-	# tree, which breaks as soon as the build dirties go.mod). Mirrors the
-	# isolated v0.4 legacy build introduced in the audit/CI fixes.
+	# never disturbed (a `git checkout $(V05_REF)` on the working tree breaks as
+	# soon as the build dirties go.mod). Mirrors the isolated v0.4 legacy build
+	# introduced in the audit/CI fixes.
 	rm -rf $(V05_WORKTREE)
 	git worktree add --force --detach $(V05_WORKTREE) $(V05_REF)
 	cd $(V05_WORKTREE)/evmd && CGO_ENABLED="1" GOFLAGS=-mod=mod \
