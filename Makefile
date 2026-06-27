@@ -378,33 +378,27 @@ test-rpc-compat-stop:
 
 .PHONY: localnet-start localnet-stop localnet-build-env localnet-build-nodes test-rpc-compat test-rpc-compat-stop
 
-test-system: build-v04 build
+test-system: build-v05 build
 	mkdir -p ./tests/systemtests/binaries/
 	cp $(BUILDDIR)/evmd ./tests/systemtests/binaries/
 	cd tests/systemtests/Counter && forge build
 	$(MAKE) -C tests/systemtests test
 
-# V04_REF is the fork's v0.4.0 release state (last commit before the v0.5.0
-# upgrade work began). This fork has no upstream-style v0.4.x git tag, so the
-# legacy binary for the v0.4.0-to-v0.5.0 upgrade test is built from this commit.
-V04_REF ?= b5053b7e
-V04_WORKTREE ?= $(BUILDDIR)/v04-src
-build-v04:
-	mkdir -p ./tests/systemtests/binaries/v0.4
+# V05_REF is the upstream v0.5.1 release tag — the "from" version for the
+# v0.5.0-to-v0.6.0 upgrade system test.
+V05_REF ?= v0.5.1
+V05_WORKTREE ?= $(BUILDDIR)/v05-src
+build-v05:
+	mkdir -p ./tests/systemtests/binaries/v0.5
 	# Build the legacy binary in a throwaway worktree so the main checkout is
-	# never disturbed (the old recipe ran `git checkout $(V04_REF)` on the
-	# working tree, which breaks as soon as the build dirties go.mod).
-	rm -rf $(V04_WORKTREE)
-	git worktree add --force --detach $(V04_WORKTREE) $(V04_REF)
-	# The v0.4.0 ref predates later fixes and will not build as-is:
-	#  - evmd/cmd/evmd/config/config.go has a duplicate map key (compile error),
-	#    fixed via the patch below;
-	#  - evmd/go.mod is out of sync with the root module graph (root requires a
-	#    newer ibc-go than evmd pins), reconciled with GOFLAGS=-mod=mod.
-	cd $(V04_WORKTREE) && git apply $(CURDIR)/tests/systemtests/patches/v04-build-fixes.patch
-	cd $(V04_WORKTREE)/evmd && CGO_ENABLED="1" GOFLAGS=-mod=mod \
-	  go build -o $(CURDIR)/tests/systemtests/binaries/v0.4/evmd ./cmd/evmd
-	git worktree remove --force $(V04_WORKTREE)
+	# never disturbed (the old recipe ran `git checkout v0.5.1` on the working
+	# tree, which breaks as soon as the build dirties go.mod). Mirrors the
+	# isolated v0.4 legacy build introduced in the audit/CI fixes.
+	rm -rf $(V05_WORKTREE)
+	git worktree add --force --detach $(V05_WORKTREE) $(V05_REF)
+	cd $(V05_WORKTREE)/evmd && CGO_ENABLED="1" GOFLAGS=-mod=mod \
+	  go build -o $(CURDIR)/tests/systemtests/binaries/v0.5/evmd ./cmd/evmd
+	git worktree remove --force $(V05_WORKTREE)
 
 mocks:
 	@echo "--> generating mocks"
