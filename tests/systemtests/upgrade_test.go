@@ -76,7 +76,11 @@ func TestChainUpgrade(t *testing.T) {
 		}(i)
 	}
 
-	systest.Sut.AwaitBlockHeight(t, upgradeHeight-1, 60*time.Second)
+	// Allow enough time to reach the pre-upgrade height. The systemtests block
+	// time is --block-time=5s (timeout_commit 4.5s), so reaching block
+	// upgradeHeight-1 from genesis takes ~(upgradeHeight-1)*5s ≈ 100s — well over
+	// the original hardcoded 60s, which timed out on slower CI runners.
+	systest.Sut.AwaitBlockHeight(t, upgradeHeight-1, 180*time.Second)
 	t.Logf("current_height: %d\n", systest.Sut.CurrentHeight())
 	raw = cli.CustomQuery("q", "gov", "proposal", proposalID)
 	proposalStatus := gjson.Get(raw, "proposal.status").String()
