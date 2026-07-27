@@ -51,6 +51,11 @@ type BankKeeper interface {
 	GetSupply(ctx context.Context, denom string) sdk.Coin
 	GetDenomMetaData(ctx context.Context, denom string) (banktypes.Metadata, bool)
 	SetDenomMetaData(ctx context.Context, denomMetaData banktypes.Metadata)
+	SendCoinsFromModuleToAccountVirtual(ctx context.Context, senderModule string, recipientAddr sdk.AccAddress, amt sdk.Coins) error
+	SendCoinsFromAccountToModuleVirtual(ctx context.Context, senderAddr sdk.AccAddress, recipientModule string, amt sdk.Coins) error
+	UncheckedSetBalance(ctx context.Context, addr sdk.AccAddress, amt sdk.Coin) error
+	LockedCoins(ctx context.Context, addr sdk.AccAddress) sdk.Coins
+	BlockedAddr(addr sdk.AccAddress) bool
 }
 
 // StakingKeeper returns the historical headers kept in store.
@@ -85,11 +90,15 @@ type EvmHooks interface {
 type BankWrapper interface {
 	BankKeeper
 
-	MintAmountToAccount(ctx context.Context, recipientAddr sdk.AccAddress, amt *big.Int) error
-	BurnAmountFromAccount(ctx context.Context, account sdk.AccAddress, amt *big.Int) error
+	SetBalance(ctx context.Context, account sdk.AccAddress, amt *big.Int) error
 }
 
 // ConsensusParamsKeeper defines the expected consensus params keeper.
 type ConsensusParamsKeeper interface {
 	Params(context.Context, *types.QueryParamsRequest) (*types.QueryParamsResponse, error)
+}
+
+// VMKeeper defines the expected interface needed for the VMKeeper when passed to functions.
+type VMKeeper interface {
+	GetEvmCoinInfo(ctx sdk.Context) (coinInfo EvmCoinInfo)
 }

@@ -43,6 +43,10 @@ build_tags = netgo
 ifeq (cleveldb,$(findstring cleveldb,$(COSMOS_BUILD_OPTIONS)))
   build_tags += gcc
 endif
+ifeq (rocksdb,$(findstring rocksdb,$(COSMOS_BUILD_OPTIONS)))
+  build_tags += gcc
+  build_tags += rocksdb
+endif
 build_tags += $(BUILD_TAGS)
 build_tags := $(strip $(build_tags))
 
@@ -57,6 +61,9 @@ ldflags = -X github.com/cosmos/cosmos-sdk/version.Name=os \
 # DB backend selection
 ifeq (cleveldb,$(findstring cleveldb,$(COSMOS_BUILD_OPTIONS)))
   ldflags += -X github.com/cosmos/cosmos-sdk/types.DBBackend=cleveldb
+endif
+ifeq (rocksdb,$(findstring rocksdb,$(COSMOS_BUILD_OPTIONS)))
+  ldflags += -X github.com/cosmos/cosmos-sdk/types.DBBackend=rocksdb
 endif
 
 # add build tags to linker flags
@@ -89,8 +96,9 @@ endif
 
 # Build into $(BUILDDIR)
 build: go.sum $(BUILDDIR)/
-	@echo "🏗️  Building evmd to $(BUILDDIR)/$(EXAMPLE_BINARY) ..."
-	@cd $(EVMD_DIR) && CGO_ENABLED="1" \
+	echo "🏗️  Building evmd to $(BUILDDIR)/$(EXAMPLE_BINARY) ..."
+	echo "BUILD_FLAGS: $(BUILD_FLAGS)"
+	cd $(EVMD_DIR) && CGO_ENABLED="1" \
 	  go build $(BUILD_FLAGS) -o $(BUILDDIR)/$(EXAMPLE_BINARY) $(EVMD_MAIN_PKG)
 
 # Cross-compile for Linux AMD64
@@ -100,6 +108,7 @@ build-linux:
 # Install into $(BINDIR)
 install: go.sum
 	@echo "🚚  Installing evmd to $(BINDIR) ..."
+	@echo "BUILD_FLAGS: $(BUILD_FLAGS)"
 	@cd $(EVMD_DIR) && CGO_ENABLED="1" \
 	  go install $(BUILD_FLAGS) $(EVMD_MAIN_PKG)
 
@@ -147,7 +156,7 @@ test-race: run-tests
 
 test-evmd: ARGS=-timeout=15m
 test-evmd:
-	@cd evmd && go test -race -tags=test -mod=readonly $(ARGS) $(EXTRA_ARGS) $(PACKAGES_EVMD)
+	@cd evmd && go test -count=1 -race -tags=test -mod=readonly $(ARGS) $(EXTRA_ARGS) $(PACKAGES_EVMD)
 
 test-unit-cover: ARGS=-timeout=15m -coverprofile=coverage.txt -covermode=atomic
 test-unit-cover: TEST_PACKAGES=$(PACKAGES_UNIT)
@@ -160,8 +169,6 @@ test-unit-cover: run-tests
 	@tail -n +2 evmd/coverage_evmd.txt >> coverage.txt && rm evmd/coverage_evmd.txt
 	@echo "🧹 Filtering ignored files from coverage.txt..."
 	@grep -v -E '/cmd/|/client/|/proto/|/testutil/|/mocks/|/test_.*\.go:|\.pb\.go:|\.pb\.gw\.go:|/x/[^/]+/module\.go:|/scripts/|/ibc/testing/|/version/|\.md:|\.pulsar\.go:' coverage.txt > tmp_coverage.txt && mv tmp_coverage.txt coverage.txt
-	@echo "📊 Coverage summary:"
-	@go tool cover -func=coverage.txt
 
 test: test-unit
 
@@ -173,22 +180,11 @@ test-all:
 
 run-tests:
 ifneq (,$(shell which tparse 2>/dev/null))
-	go test -race -tags=test -mod=readonly -json $(ARGS) $(EXTRA_ARGS) $(TEST_PACKAGES) | tparse
+	go test -count=1 -race -tags=test -mod=readonly -json $(ARGS) $(EXTRA_ARGS) $(TEST_PACKAGES) | tparse
 else
-	go test -race -tags=test -mod=readonly $(ARGS) $(EXTRA_ARGS) $(TEST_PACKAGES)
+	go test -count=1 -race -tags=test -mod=readonly $(ARGS) $(EXTRA_ARGS) $(TEST_PACKAGES)
 endif
 
-# Use the old Apple linker to workaround broken xcode - https://github.com/golang/go/issues/65169
-ifeq ($(OS_FAMILY),Darwin)
-  FUZZLDFLAGS := -ldflags=-extldflags=-Wl,-ld_classic
-endif
-
-test-fuzz:
-	go test -race -tags=test $(FUZZLDFLAGS) -run NOTAREALTEST -v -fuzztime 10s -fuzz=FuzzMintCoins ./x/precisebank/keeper
-	go test -race -tags=test $(FUZZLDFLAGS) -run NOTAREALTEST -v -fuzztime 10s -fuzz=FuzzBurnCoins ./x/precisebank/keeper
-	go test -race -tags=test $(FUZZLDFLAGS) -run NOTAREALTEST -v -fuzztime 10s -fuzz=FuzzSendCoins ./x/precisebank/keeper
-	go test -race -tags=test $(FUZZLDFLAGS) -run NOTAREALTEST -v -fuzztime 10s -fuzz=FuzzGenesisStateValidate_NonZeroRemainder ./x/precisebank/types
-	go test -race -tags=test $(FUZZLDFLAGS) -run NOTAREALTEST -v -fuzztime 10s -fuzz=FuzzGenesisStateValidate_ZeroRemainder ./x/precisebank/types
 
 test-scripts:
 	@echo "Running scripts tests"
@@ -209,7 +205,7 @@ benchmark:
 ###                                Linting                                  ###
 ###############################################################################
 golangci_lint_cmd=golangci-lint
-golangci_version=v2.2.2
+golangci_version=v2.10.1
 
 lint: lint-go lint-python lint-contracts
 
@@ -256,7 +252,7 @@ format-shell:
 ###                                Protobuf                                 ###
 ###############################################################################
 
-protoVer=0.14.0
+protoVer=0.18.1
 protoImageName=ghcr.io/cosmos/proto-builder:$(protoVer)
 protoImage=$(DOCKER) run --rm -v $(CURDIR):/workspace --workdir /workspace --user 0 $(protoImageName)
 
@@ -376,19 +372,19 @@ test-rpc-compat:
 test-rpc-compat-stop:
 	cd tests/jsonrpc && docker compose down
 
-.PHONY: localnet-start localnet-stop localnet-build-env localnet-build-nodes test-rpc-compat test-rpc-compat-stop
+.PHONY: localnet-start localnet-stop localnet-build-env localnet-build-nodes test-rpc-compat test-rpc-compat-stop mocks
 
-test-system: build-v05 build
+test-system: build-v06 build
 	mkdir -p ./tests/systemtests/binaries/
 	cp $(BUILDDIR)/evmd ./tests/systemtests/binaries/
 	cd tests/systemtests/Counter && forge build
 	$(MAKE) -C tests/systemtests test
 
-build-v05:
-	mkdir -p ./tests/systemtests/binaries/v0.5
-	git checkout v0.5.1
+build-v06:
+	mkdir -p ./tests/systemtests/binaries/v0.6
+	git checkout v0.6.0
 	make build
-	cp $(BUILDDIR)/evmd ./tests/systemtests/binaries/v0.5
+	cp $(BUILDDIR)/evmd ./tests/systemtests/binaries/v0.6
 	git checkout -
 
 mocks:

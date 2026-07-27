@@ -3,8 +3,6 @@ package network
 import (
 	erc20types "github.com/cosmos/evm/x/erc20/types"
 	feemarkettypes "github.com/cosmos/evm/x/feemarket/types"
-	precisebankkeeper "github.com/cosmos/evm/x/precisebank/keeper"
-	precisebanktypes "github.com/cosmos/evm/x/precisebank/types"
 	evmtypes "github.com/cosmos/evm/x/vm/types"
 
 	"github.com/cosmos/cosmos-sdk/baseapp"
@@ -12,7 +10,6 @@ import (
 	"github.com/cosmos/cosmos-sdk/types/module/testutil"
 	authkeeper "github.com/cosmos/cosmos-sdk/x/auth/keeper"
 	authtypes "github.com/cosmos/cosmos-sdk/x/auth/types"
-	"github.com/cosmos/cosmos-sdk/x/authz"
 	banktypes "github.com/cosmos/cosmos-sdk/x/bank/types"
 	distrkeeper "github.com/cosmos/cosmos-sdk/x/distribution/keeper"
 	distrtypes "github.com/cosmos/cosmos-sdk/x/distribution/types"
@@ -69,12 +66,6 @@ func (n *IntegrationNetwork) GetAuthClient() authtypes.QueryClient {
 	return authtypes.NewQueryClient(queryHelper)
 }
 
-func (n *IntegrationNetwork) GetAuthzClient() authz.QueryClient {
-	queryHelper := getQueryHelper(n.GetContext(), n.GetEncodingConfig())
-	authz.RegisterQueryServer(queryHelper, n.app.GetAuthzKeeper())
-	return authz.NewQueryClient(queryHelper)
-}
-
 func (n *IntegrationNetwork) GetStakingClient() stakingtypes.QueryClient {
 	queryHelper := getQueryHelper(n.GetContext(), n.GetEncodingConfig())
 	stakingtypes.RegisterQueryServer(queryHelper, stakingkeeper.Querier{Keeper: n.app.GetStakingKeeper()})
@@ -91,10 +82,4 @@ func (n *IntegrationNetwork) GetMintClient() minttypes.QueryClient {
 	queryHelper := getQueryHelper(n.GetContext(), n.GetEncodingConfig())
 	minttypes.RegisterQueryServer(queryHelper, mintkeeper.NewQueryServerImpl(n.app.GetMintKeeper()))
 	return minttypes.NewQueryClient(queryHelper)
-}
-
-func (n *IntegrationNetwork) GetPreciseBankClient() precisebanktypes.QueryClient {
-	queryHelper := getQueryHelper(n.GetContext(), n.GetEncodingConfig())
-	precisebanktypes.RegisterQueryServer(queryHelper, precisebankkeeper.NewQueryServerImpl(*n.app.GetPreciseBankKeeper()))
-	return precisebanktypes.NewQueryClient(queryHelper)
 }

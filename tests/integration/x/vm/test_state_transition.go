@@ -30,14 +30,16 @@ import (
 	"github.com/cosmos/evm/x/vm/types"
 
 	sdkmath "cosmossdk.io/math"
-	storetypes "cosmossdk.io/store/types"
 
+	storetypes "github.com/cosmos/cosmos-sdk/store/v2/types"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	authtypes "github.com/cosmos/cosmos-sdk/x/auth/types"
 	banktypes "github.com/cosmos/cosmos-sdk/x/bank/types"
 	consensustypes "github.com/cosmos/cosmos-sdk/x/consensus/types"
 	govtypes "github.com/cosmos/cosmos-sdk/x/gov/types"
 )
+
+const TestPostProcessingEventType = "test_post_processing_event"
 
 func (s *KeeperTestSuite) TestContextSetConsensusParams() {
 	// set new value of max gas in consensus params
@@ -70,7 +72,7 @@ func (s *KeeperTestSuite) TestContextSetConsensusParams() {
 
 	// evm should query the max gas from consensus keeper, yielding the number set above.
 	vm := s.Network.App.GetEVMKeeper().NewEVM(queryContext, *msg, cfg, nil, s.Network.GetStateDB())
-	//nolint:gosec
+
 	s.Require().Equal(vm.Context.GasLimit, uint64(maxGas))
 
 	// if we explicitly set the consensus params in context, like when Cosmos builds a transaction context,
@@ -157,14 +159,26 @@ func (s *KeeperTestSuite) TestGetCoinbaseAddress() {
 		msg      string
 		malleate func() sdk.Context
 		expPass  bool
+		expEmpty bool
 	}{
+		{
+			"empty proposer address - should return empty address without error",
+			func() sdk.Context {
+				header := s.Network.GetContext().BlockHeader()
+				header.ProposerAddress = sdk.ConsAddress{}
+				return s.Network.GetContext().WithBlockHeader(header)
+			},
+			true,
+			true,
+		},
 		{
 			"validator not found",
 			func() sdk.Context {
 				header := s.Network.GetContext().BlockHeader()
-				header.ProposerAddress = []byte{}
+				header.ProposerAddress = []byte{1, 2, 3}
 				return s.Network.GetContext().WithBlockHeader(header)
 			},
+			false,
 			false,
 		},
 		{
@@ -173,23 +187,33 @@ func (s *KeeperTestSuite) TestGetCoinbaseAddress() {
 				return s.Network.GetContext()
 			},
 			true,
+			false,
 		},
 	}
 
 	for _, tc := range testCases {
 		s.Run(fmt.Sprintf("Case %s", tc.msg), func() {
 			ctx := tc.malleate()
-			proposerAddress := ctx.BlockHeader().ProposerAddress
+			var proposerAddress sdk.ConsAddress
+			if tc.expEmpty {
+				proposerAddress = sdk.ConsAddress{}
+			} else {
+				proposerAddress = ctx.BlockHeader().ProposerAddress
+			}
 
 			// Function being tested
 			coinbase, err := s.Network.App.GetEVMKeeper().GetCoinbaseAddress(
 				ctx,
-				sdk.ConsAddress(proposerAddress),
+				proposerAddress,
 			)
 
 			if tc.expPass {
 				s.Require().NoError(err)
-				s.Require().Equal(proposerAddressHex, coinbase)
+				if tc.expEmpty {
+					s.Require().Equal(common.Address{}, coinbase)
+				} else {
+					s.Require().Equal(proposerAddressHex, coinbase)
+				}
 			} else {
 				s.Require().Error(err)
 			}
@@ -412,6 +436,14 @@ func (s *KeeperTestSuite) TestRefundGas() {
 	grpcHandler := grpc.NewIntegrationHandler(unitNetwork)
 	txFactory := factory.New(unitNetwork, grpcHandler)
 
+	// With virtual fee collection enabled, RefundGas uses virtual balance.
+	// Move the fee collector's real coins into its virtual balance.
+	feeCollectorAddr := authtypes.NewModuleAddress(authtypes.FeeCollectorName)
+	err := unitNetwork.App.GetBankKeeper().SendCoinsFromAccountToModuleVirtual(
+		unitNetwork.GetContext(), feeCollectorAddr, authtypes.FeeCollectorName, coins,
+	)
+	s.Require().NoError(err)
+
 	sender := Keyring.GetKey(0)
 	recipient := Keyring.GetAddr(1)
 
@@ -593,6 +625,13 @@ func (s *KeeperTestSuite) TestApplyTransaction() {
 	s.Require().NoError(err)
 	err = s.Network.App.GetBankKeeper().SendCoinsFromModuleToModule(ctx, "mint", "fee_collector", sdk.NewCoins(sdk.NewCoin("aatom", sdkmath.NewInt(3e18))))
 	s.Require().NoError(err)
+	// With virtual fee collection enabled, RefundGas uses virtual balance.
+	// Move the fee collector's real coins into its virtual balance.
+	feeCollectorAddr := authtypes.NewModuleAddress(authtypes.FeeCollectorName)
+	err = s.Network.App.GetBankKeeper().SendCoinsFromAccountToModuleVirtual(
+		ctx, feeCollectorAddr, authtypes.FeeCollectorName, sdk.NewCoins(sdk.NewCoin("aatom", sdkmath.NewInt(3e18))),
+	)
+	s.Require().NoError(err)
 	testCases := []struct {
 		name       string
 		gasLimit   uint64
@@ -654,6 +693,7 @@ func (s *KeeperTestSuite) TestApplyTransactionWithTxPostProcessing() {
 					keeper.NewMultiEvmHooks(
 						&testHooks{
 							postProcessing: func(ctx sdk.Context, sender common.Address, msg core.Message, receipt *gethtypes.Receipt) error {
+								ctx.EventManager().EmitEvent(sdk.NewEvent(TestPostProcessingEventType))
 								return nil
 							},
 						},
@@ -685,7 +725,17 @@ func (s *KeeperTestSuite) TestApplyTransactionWithTxPostProcessing() {
 				s.Require().Equal(senderBefore.Sub(sdkmath.NewIntFromBigInt(transferAmt)), senderAfter)
 				s.Require().Equal(recipientBefore.Add(sdkmath.NewIntFromBigInt(transferAmt)), recipientAfter)
 			},
-			func(s *KeeperTestSuite) {},
+			func(s *KeeperTestSuite) {
+				// check if the event emitted exactly once
+				events := s.Network.GetContext().EventManager().Events()
+				var postProcessingEvents []sdk.Event
+				for _, event := range events {
+					if event.Type == TestPostProcessingEventType {
+						postProcessingEvents = append(postProcessingEvents, event)
+					}
+				}
+				s.Require().Len(postProcessingEvents, 1)
+			},
 		},
 		{
 			"pass - evm tx succeeds, post processing is called but fails, the balance is unchanged",
@@ -873,11 +923,18 @@ func (s *KeeperTestSuite) TestApplyMessageWithConfig() {
 	testAddr := utiltx.GenerateAddress()
 	balance := (*hexutil.Big)(big.NewInt(1000000000000000000))
 	nonce := hexutil.Uint64(0)
+	movedStaticPrecompileAddr := utiltx.GenerateAddress()
 
 	overrides := rpctypes.StateOverride{
 		testAddr: rpctypes.OverrideAccount{
 			Balance: &balance,
 			Nonce:   &nonce,
+		},
+	}
+
+	staticPrecompileMoveOverrides := rpctypes.StateOverride{
+		common.HexToAddress(types.DistributionPrecompileAddress): rpctypes.OverrideAccount{
+			MovePrecompileTo: &movedStaticPrecompileAddr,
 		},
 	}
 
@@ -1055,6 +1112,29 @@ func (s *KeeperTestSuite) TestApplyMessageWithConfig() {
 			expectedGasUsed:    params.TxGas,
 		},
 		{
+			name: "success - move cosmos static precompile with state overrides",
+			getMessage: func() core.Message {
+				sender := s.Keyring.GetKey(0)
+				recipient := s.Keyring.GetAddr(1)
+				msg, err := s.Factory.GenerateGethCoreMsg(sender.Priv, types.EvmTxArgs{
+					To:     &recipient,
+					Amount: big.NewInt(100),
+				})
+				s.Require().NoError(err)
+				return *msg
+			},
+			getEVMParams: func() types.Params {
+				params := types.DefaultParams()
+				params.ActiveStaticPrecompiles = append([]string(nil), types.AvailableStaticPrecompiles...)
+				return params
+			},
+			getFeeMarketParams: feemarkettypes.DefaultParams,
+			overrides:          &staticPrecompileMoveOverrides,
+			expErr:             false,
+			expVMErr:           false,
+			expectedGasUsed:    params.TxGas,
+		},
+		{
 			name: "call contract tx with config param EnableCall = false",
 			getMessage: func() core.Message {
 				sender := s.Keyring.GetKey(0)
@@ -1208,6 +1288,7 @@ func (s *KeeperTestSuite) TestApplyMessageWithConfig() {
 
 			err = s.Network.NextBlock()
 			if tc.expVMErr {
+				s.Require().NoError(err)
 				s.Require().NotEmpty(res.VmError)
 				return
 			}

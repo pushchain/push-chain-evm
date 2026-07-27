@@ -64,6 +64,7 @@ func NewLedgerHub() (*Hub, error) {
 		0x0005, /* Ledger Nano S Plus */
 		0x0006, /* Ledger Nano FTS */
 		0x0007, /* Ledger Flex */
+		0x0008, /* Ledger Nano Gen5 */
 
 		0x0000, /* WebUSB Ledger Blue */
 		0x1000, /* WebUSB Ledger Nano S */
@@ -71,6 +72,7 @@ func NewLedgerHub() (*Hub, error) {
 		0x5000, /* WebUSB Ledger Nano S Plus */
 		0x6000, /* WebUSB Ledger Nano FTS */
 		0x7000, /* WebUSB Ledger Flex */
+		0x8000, /* WebUSB Ledger Nano Gen5 */
 	}, 0xffa0, 0, newLedgerDriver)
 }
 
@@ -152,7 +154,11 @@ func (hub *Hub) refreshWallets() {
 	for _, info := range infos {
 		for _, id := range hub.productIDs {
 			// Windows and macOS use UsageID matching, Linux uses Interface matching
-			if info.ProductID == id && (info.UsagePage == hub.usageID || info.Interface == hub.endpointID) {
+			// Ledger product IDs use MMII format where MM is device model and II is interface flags.
+			// Match either exact legacy IDs (0x0001, 0x0004, etc.) or device model prefix for
+			// WebUSB/app-specific IDs (e.g., 0x4011 matches 0x4000 prefix for Nano X with Ethereum app).
+			modelMatch := id >= 0x1000 && (info.ProductID>>8 == id>>8)
+			if (info.ProductID == id || modelMatch) && (info.UsagePage == hub.usageID || info.Interface == hub.endpointID) {
 				devices = append(devices, info)
 				break
 			}

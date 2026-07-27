@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math/big"
 	"sync"
+	"sync/atomic"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core"
@@ -18,9 +19,9 @@ import (
 	evmtypes "github.com/cosmos/evm/x/vm/types"
 
 	sdkerrors "cosmossdk.io/errors"
-	"cosmossdk.io/log"
-	sdktypes "cosmossdk.io/store/types"
+	"cosmossdk.io/log/v2"
 
+	sdktypes "github.com/cosmos/cosmos-sdk/store/v2/types"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 )
 
@@ -44,6 +45,9 @@ type Blockchain struct {
 	previousHeaderHash common.Hash
 	latestCtx          sdk.Context
 	mu                 sync.RWMutex
+	coinInfo           atomic.Pointer[evmtypes.EvmCoinInfo]
+
+	testingCommitMu sync.RWMutex
 }
 
 // NewBlockchain creates a new Blockchain instance that bridges Cosmos SDK state with Ethereum mempools.
@@ -81,7 +85,7 @@ func (b *Blockchain) Config() *params.ChainConfig {
 // including block height, timestamp, gas limits, and base fee (if London fork is active).
 // Returns a zero header as placeholder if the context is not yet available.
 func (b *Blockchain) CurrentBlock() *types.Header {
-	ctx, err := b.GetLatestContext()
+	ctx, err := b.newLatestContext()
 	if err != nil {
 		return b.zeroHeader
 	}
@@ -211,12 +215,33 @@ func (b *Blockchain) StateAt(hash common.Hash) (vm.StateDB, error) {
 		return nil, fmt.Errorf("failed to get latest context for StateAt: %w", err)
 	}
 
-	appHash := ctx.BlockHeader().AppHash
-	stateDB := statedb.New(ctx, b.vmKeeper, statedb.NewEmptyTxConfig())
+	// Create a cache context to isolate the StateDB from concurrent commits.
+	// This prevents race conditions when the background txpool reorg goroutine
+	// reads state while the main thread is committing new blocks.
+	cacheCtx, _ := ctx.CacheContext()
+	// Use an infinite gas meter to avoid tracking gas for read-only state queries
+	cacheCtx = cacheCtx.WithGasMeter(sdktypes.NewInfiniteGasMeter())
+
+	appHash := cacheCtx.BlockHeader().AppHash
+	stateDB := statedb.New(cacheCtx, b.vmKeeper, statedb.NewEmptyTxConfig())
 
 	b.logger.Debug("StateDB created successfully", "app_hash", common.Hash(appHash).Hex())
 	return stateDB, nil
 }
+
+// BeginCommit acquires an exclusive lock to prevent mempool state reads during Commit.
+// This avoids data races in the underlying storage (e.g., IAVL) when tests run with -race.
+func (b *Blockchain) BeginCommit() { b.testingCommitMu.Lock() }
+
+// EndCommit releases the exclusive lock acquired by BeginCommit.
+func (b *Blockchain) EndCommit() { b.testingCommitMu.Unlock() }
+
+// BeginRead acquires a shared lock for background readers (e.g., txpool reorg).
+// This enables optional coordination with Commit without importing the type.
+func (b *Blockchain) BeginRead() { b.testingCommitMu.RLock() }
+
+// EndRead releases the shared read lock acquired by BeginRead.
+func (b *Blockchain) EndRead() { b.testingCommitMu.RUnlock() }
 
 func (b *Blockchain) getPreviousHeaderHash() common.Hash {
 	b.mu.RLock()
@@ -267,4 +292,32 @@ func (b *Blockchain) newLatestContext() (sdk.Context, error) {
 		"gas_limit", b.blockGasLimit)
 
 	return ctx, nil
+}
+
+// GetCoinDenom returns the coin denom used in the EVM.
+// Note: return "" if height=0.
+func (b *Blockchain) GetCoinDenom() string {
+	coinInfo, err := b.getEvmCoinInfo()
+	if err != nil {
+		b.logger.Error("Failed to get evm coin info", "error", err)
+		return ""
+	}
+
+	return coinInfo.Denom
+}
+
+func (b *Blockchain) getEvmCoinInfo() (*evmtypes.EvmCoinInfo, error) {
+	if coin := b.coinInfo.Load(); coin != nil {
+		return coin, nil
+	}
+
+	ctx, err := b.GetLatestContext()
+	if err != nil {
+		return nil, err
+	}
+
+	coinInfo := b.vmKeeper.GetEvmCoinInfo(ctx)
+	b.coinInfo.Store(&coinInfo)
+
+	return &coinInfo, nil
 }
