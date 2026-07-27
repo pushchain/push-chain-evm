@@ -1,9 +1,9 @@
 package ibc
 
 import (
-	channeltypes "github.com/cosmos/ibc-go/v10/modules/core/04-channel/types"
-	porttypes "github.com/cosmos/ibc-go/v10/modules/core/05-port/types"
-	"github.com/cosmos/ibc-go/v10/modules/core/exported"
+	channeltypes "github.com/cosmos/ibc-go/v11/modules/core/04-channel/types"
+	porttypes "github.com/cosmos/ibc-go/v11/modules/core/05-port/types"
+	"github.com/cosmos/ibc-go/v11/modules/core/exported"
 
 	sdk "github.com/cosmos/cosmos-sdk/types"
 )
@@ -132,4 +132,8 @@ func (im Module) UnmarshalPacketData(ctx sdk.Context, portID string, channelID s
 		panic("app does not implement porttypes.PacketDataUnmarshaler")
 	}
 	return pd.UnmarshalPacketData(ctx, portID, channelID, bz)
+}
+
+func (im Module) SetICS4Wrapper(wrapper porttypes.ICS4Wrapper) {
+	im.app.SetICS4Wrapper(wrapper)
 }

@@ -8,13 +8,12 @@ import (
 	testutiltx "github.com/cosmos/evm/testutil/tx"
 	evmtypes "github.com/cosmos/evm/x/vm/types"
 
-	storetypes "cosmossdk.io/store/types"
-
+	storetypes "github.com/cosmos/cosmos-sdk/store/v2/types"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 )
 
 func (s *EvmAnteTestSuite) TestEthSetupContextDecorator() {
-	dec := evmante.NewEthSetUpContextDecorator(s.GetNetwork().App.GetEVMKeeper())
+	dec := evmante.EthSetupContextDecorator{}
 	ethContractCreationTxParams := &evmtypes.EvmTxArgs{
 		ChainID:  evmtypes.GetEthChainConfig().ChainID,
 		Nonce:    1,

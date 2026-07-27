@@ -1,25 +1,23 @@
 package erc20
 
 import (
-	"embed"
+	"bytes"
 	"fmt"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/core/vm"
 
+	_ "embed"
+
 	ibcutils "github.com/cosmos/evm/ibc"
 	cmn "github.com/cosmos/evm/precompiles/common"
 	erc20types "github.com/cosmos/evm/x/erc20/types"
 
-	storetypes "cosmossdk.io/store/types"
-
+	storetypes "github.com/cosmos/cosmos-sdk/store/v2/types"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 )
 
 const (
-	// abiPath defines the path to the ERC-20 precompile ABI JSON file.
-	abiPath = "abi.json"
-
 	// NOTE: These gas values have been derived from tests that have been concluded on a testing branch, which
 	// is not being merged to the main branch. The reason for this was to not clutter the repository with the
 	// necessary tests for this use case.
@@ -42,13 +40,13 @@ var (
 	// Embed abi json file to the executable binary. Needed when importing as dependency.
 	//
 	//go:embed abi.json
-	f   embed.FS
+	f   []byte
 	ABI abi.ABI
 )
 
 func init() {
 	var err error
-	ABI, err = cmn.LoadABI(f, abiPath)
+	ABI, err = abi.JSON(bytes.NewReader(f))
 	if err != nil {
 		panic(err)
 	}
@@ -66,12 +64,6 @@ type Precompile struct {
 	erc20Keeper    Erc20Keeper
 	// BankKeeper is a public field so that the werc20 precompile can use it.
 	BankKeeper cmn.BankKeeper
-}
-
-// LoadABI loads the IERC20Metadata ABI from the embedded abi.json file
-// for the erc20 precompile.
-func LoadABI() (abi.ABI, error) {
-	return cmn.LoadABI(f, abiPath)
 }
 
 // NewPrecompile creates a new ERC-20 Precompile instance as a
@@ -95,6 +87,10 @@ func NewPrecompile(
 		erc20Keeper:    erc20Keeper,
 		transferKeeper: transferKeeper,
 	}
+}
+
+func (p Precompile) Name() string {
+	return "erc20"
 }
 
 // RequiredGas calculates the contract gas used for the
@@ -192,7 +188,7 @@ func (p *Precompile) HandleMethod(
 		bz, err = p.Approve(ctx, contract, stateDB, method, args)
 	// ERC-20 queries
 	case NameMethod:
-		bz, err = p.Name(ctx, contract, stateDB, method, args)
+		bz, err = p.TokenName(ctx, contract, stateDB, method, args)
 	case SymbolMethod:
 		bz, err = p.Symbol(ctx, contract, stateDB, method, args)
 	case DecimalsMethod:

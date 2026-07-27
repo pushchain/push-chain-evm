@@ -1,6 +1,7 @@
 package types
 
 import (
+	"strings"
 	"testing"
 
 	ethparams "github.com/ethereum/go-ethereum/params"
@@ -49,6 +50,22 @@ func TestParamsValidate(t *testing.T) {
 			},
 			errContains: "precompiles need to be sorted",
 		},
+		{
+			name: "lowercase access control entries",
+			params: Params{
+				AccessControl: AccessControl{
+					Create: AccessControlType{
+						AccessType:        AccessTypePermissionless,
+						AccessControlList: []string{strings.ToLower("0x8FA78CEB7F04118Ec6d06AaC37Ca854691d8e963")},
+					},
+					Call: AccessControlType{
+						AccessType:        AccessTypePermissioned,
+						AccessControlList: []string{strings.ToLower("0x8FA78CEB7F04118Ec6d06AaC37Ca854691d8e963")},
+					},
+				},
+			},
+			expPass: true,
+		},
 	}
 
 	for _, tc := range testCases {
@@ -84,13 +101,10 @@ func TestParamsEIPs(t *testing.T) {
 }
 
 func TestParamsValidatePriv(t *testing.T) {
-	require.Error(t, validateEIPs(""))
 	require.NoError(t, validateEIPs([]int64{1884}))
 	require.ErrorContains(t, validateEIPs([]int64{1884, 1884, 1885}), "duplicate EIP: 1884")
 	require.NoError(t, validateChannels([]string{"channel-0"}))
-	require.Error(t, validateChannels(false))
-	require.Error(t, validateChannels(int64(123)))
-	require.Error(t, validateChannels(""))
+	require.Error(t, validateChannels([]string{"invalid"}))
 }
 
 func TestIsLondon(t *testing.T) {

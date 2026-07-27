@@ -7,11 +7,11 @@ import (
 	"fmt"
 
 	erc20types "github.com/cosmos/evm/x/erc20/types"
-	transfertypes "github.com/cosmos/ibc-go/v10/modules/apps/transfer/types"
-	clienttypes "github.com/cosmos/ibc-go/v10/modules/core/02-client/types"
-	channeltypes "github.com/cosmos/ibc-go/v10/modules/core/04-channel/types"
-	channeltypesv2 "github.com/cosmos/ibc-go/v10/modules/core/04-channel/v2/types"
-	ibcapi "github.com/cosmos/ibc-go/v10/modules/core/api"
+	transfertypes "github.com/cosmos/ibc-go/v11/modules/apps/transfer/types"
+	clienttypes "github.com/cosmos/ibc-go/v11/modules/core/02-client/types"
+	channeltypes "github.com/cosmos/ibc-go/v11/modules/core/04-channel/types"
+	channeltypesv2 "github.com/cosmos/ibc-go/v11/modules/core/04-channel/v2/types"
+	ibcapi "github.com/cosmos/ibc-go/v11/modules/core/api"
 
 	sdk "github.com/cosmos/cosmos-sdk/types"
 )
@@ -86,8 +86,14 @@ func (im IBCMiddleware) OnRecvPacket(
 			Status: channeltypesv2.PacketStatus_Failure,
 		}
 	}
-	im.keeper.OnRecvPacket(ctx, packet, ack)
-	return recvResult
+	modifiedAck := im.keeper.OnRecvPacket(ctx, packet, ack)
+	if !modifiedAck.Success() {
+		return channeltypesv2.RecvPacketResult{Status: channeltypesv2.PacketStatus_Failure}
+	} else if !bytes.Equal(modifiedAck.Acknowledgement(), ack.Acknowledgement()) {
+		ctx.Logger().Error("erc20 ibcv2 middleware keeper modified the application ack, original: %s modified: %s", ack.Acknowledgement(), modifiedAck.Acknowledgement())
+		return channeltypesv2.RecvPacketResult{Status: recvResult.Status, Acknowledgement: modifiedAck.Acknowledgement()}
+	}
+	return channeltypesv2.RecvPacketResult{Status: recvResult.Status, Acknowledgement: modifiedAck.Acknowledgement()}
 }
 
 // OnAcknowledgementPacket implements the IBCModule interface.

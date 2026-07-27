@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"math/big"
-	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
@@ -12,12 +11,14 @@ import (
 	ethtypes "github.com/ethereum/go-ethereum/core/types"
 	ethparams "github.com/ethereum/go-ethereum/params"
 	"github.com/pkg/errors"
+	"go.opentelemetry.io/otel"
 
 	abci "github.com/cometbft/cometbft/abci/types"
 	cmtrpcclient "github.com/cometbft/cometbft/rpc/client"
 	cmtrpccore "github.com/cometbft/cometbft/rpc/core/types"
 	cmttypes "github.com/cometbft/cometbft/types"
 
+	evmtrace "github.com/cosmos/evm/trace"
 	feemarkettypes "github.com/cosmos/evm/x/feemarket/types"
 	evmtypes "github.com/cosmos/evm/x/vm/types"
 
@@ -27,15 +28,6 @@ import (
 	"github.com/cosmos/cosmos-sdk/client"
 	errortypes "github.com/cosmos/cosmos-sdk/types/errors"
 )
-
-// ExceedBlockGasLimitError defines the error message when tx execution exceeds the block gas limit.
-// The tx fee is deducted in ante handler, so it shouldn't be ignored in JSON-RPC API.
-const ExceedBlockGasLimitError = "out of gas in location: block gas meter; gasWanted:"
-
-// StateDBCommitError defines the error message when commit after executing EVM transaction, for example
-// transfer native token to a distribution module account 0x93354845030274cD4bf1686Abd60AB28EC52e1a7 using an evm type transaction
-// note: the transfer amount cannot be set to 0, otherwise this problem will not be triggered
-const StateDBCommitError = "failed to commit stateDB"
 
 // RawTxToEthTx returns a evm MsgEthereum transaction from raw tx bytes.
 func RawTxToEthTx(clientCtx client.Context, txBz cmttypes.Tx) ([]*evmtypes.MsgEthereumTx, error) {
@@ -97,8 +89,13 @@ func EthHeaderFromComet(header cmttypes.Header, bloom ethtypes.Bloom, baseFee *b
 	}
 }
 
+var tracer = otel.Tracer("evm/rpc/types")
+
 // BlockMaxGasFromConsensusParams returns the gas limit for the current block from the chain consensus params.
-func BlockMaxGasFromConsensusParams(goCtx context.Context, clientCtx client.Context, blockHeight int64) (int64, error) {
+func BlockMaxGasFromConsensusParams(goCtx context.Context, clientCtx client.Context, blockHeight int64) (_ int64, err error) {
+	goCtx, span := tracer.Start(goCtx, "BlockMaxGasFromConsensusParams")
+	defer func() { evmtrace.EndSpanErr(span, err) }()
+
 	cmtrpcclient, ok := clientCtx.Client.(cmtrpcclient.Client)
 	if !ok {
 		panic("incorrect tm rpc client")
@@ -377,22 +374,6 @@ func CheckTxFee(gasPrice *big.Int, gas uint64, minCap float64) error {
 		return fmt.Errorf("tx fee (%.2f ether) exceeds the configured cap (%.2f ether)", feeFloat, minCap)
 	}
 	return nil
-}
-
-// TxExceedBlockGasLimit returns true if the tx exceeds block gas limit.
-func TxExceedBlockGasLimit(res *abci.ExecTxResult) bool {
-	return strings.Contains(res.Log, ExceedBlockGasLimitError)
-}
-
-// TxStateDBCommitError returns true if the evm tx commit error.
-func TxStateDBCommitError(res *abci.ExecTxResult) bool {
-	return strings.Contains(res.Log, StateDBCommitError)
-}
-
-// TxSucessOrExpectedFailure returns true if the transaction was successful
-// or if it failed with an ExceedBlockGasLimit error or TxStateDBCommitError error
-func TxSucessOrExpectedFailure(res *abci.ExecTxResult) bool {
-	return res.Code == 0 || TxExceedBlockGasLimit(res) || TxStateDBCommitError(res)
 }
 
 // CalcBaseFee calculates the basefee of the header.

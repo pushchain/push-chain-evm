@@ -8,12 +8,11 @@ import (
 
 	"github.com/cosmos/evm/ibc"
 	"github.com/cosmos/evm/x/erc20/types"
-	transfertypes "github.com/cosmos/ibc-go/v10/modules/apps/transfer/types"
-	channeltypes "github.com/cosmos/ibc-go/v10/modules/core/04-channel/types"
-	"github.com/cosmos/ibc-go/v10/modules/core/exported"
+	transfertypes "github.com/cosmos/ibc-go/v11/modules/apps/transfer/types"
+	channeltypes "github.com/cosmos/ibc-go/v11/modules/core/04-channel/types"
+	"github.com/cosmos/ibc-go/v11/modules/core/exported"
 
 	errorsmod "cosmossdk.io/errors"
-	storetypes "cosmossdk.io/store/types"
 
 	"github.com/cosmos/cosmos-sdk/telemetry"
 	sdk "github.com/cosmos/cosmos-sdk/types"
@@ -50,26 +49,8 @@ func (k Keeper) OnRecvPacket(
 		return channeltypes.NewErrorAcknowledgement(err)
 	}
 
-	// use a zero gas config to avoid extra costs for the relayers
-	ctx = ctx.
-		WithKVGasConfig(storetypes.GasConfig{}).
-		WithTransientKVGasConfig(storetypes.GasConfig{})
-
-	// recipient (local chain address): accept hex or local bech32
-	recipientBz, err := k.addrCodec.StringToBytes(data.Receiver)
-	if err != nil {
-		return channeltypes.NewErrorAcknowledgement(errorsmod.Wrap(err, "invalid recipient"))
-	}
-	recipient := sdk.AccAddress(recipientBz)
-
-	receiverAcc := k.accountKeeper.GetAccount(ctx, recipient)
-
-	// return acknowledgement without conversion if receiver is a module account
-	if types.IsModuleAccount(receiverAcc) {
-		return ack
-	}
-
-	// parse the transferred denom
+	// Parse the transferred denom early to check for early exit conditions
+	// before attempting to parse potentially foreign sender addresses (e.g. Penumbra)
 	token := transfertypes.Token{
 		Denom:  transfertypes.ExtractDenomFromPath(data.Denom),
 		Amount: data.Amount,
@@ -89,6 +70,20 @@ func (k Keeper) OnRecvPacket(
 	}
 	if coin.Denom == bondDenom {
 		// no-op, received coin is the staking denomination
+		return ack
+	}
+
+	// recipient (local chain address): accept hex or local bech32
+	recipientBz, err := k.addrCodec.StringToBytes(data.Receiver)
+	if err != nil {
+		return channeltypes.NewErrorAcknowledgement(errorsmod.Wrap(err, "invalid recipient"))
+	}
+	recipient := sdk.AccAddress(recipientBz)
+
+	receiverAcc := k.accountKeeper.GetAccount(ctx, recipient)
+
+	// return acknowledgement without conversion if receiver is a module account
+	if types.IsModuleAccount(receiverAcc) {
 		return ack
 	}
 
@@ -215,11 +210,6 @@ func (k Keeper) ConvertCoinToERC20FromPacket(ctx sdk.Context, data transfertypes
 
 	// Case 2. if pair is native ERC20 -> unescrow
 	case pair.IsNativeERC20():
-		// use a zero gas config to avoid extra costs for the relayers
-		ctx = ctx.
-			WithKVGasConfig(storetypes.GasConfig{}).
-			WithTransientKVGasConfig(storetypes.GasConfig{})
-
 		params := k.GetParams(ctx)
 		if !params.EnableErc20 || !k.IsDenomRegistered(ctx, coin.Denom) {
 			// no-op, ERC20s are disabled or the denom is not registered

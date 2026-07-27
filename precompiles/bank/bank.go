@@ -6,18 +6,19 @@
 package bank
 
 import (
-	"embed"
+	"bytes"
 	"fmt"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/vm"
 
+	_ "embed"
+
 	cmn "github.com/cosmos/evm/precompiles/common"
 	evmtypes "github.com/cosmos/evm/x/vm/types"
 
-	storetypes "cosmossdk.io/store/types"
-
+	storetypes "github.com/cosmos/cosmos-sdk/store/v2/types"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 )
 
@@ -38,13 +39,13 @@ var (
 	// Embed abi json file to the executable binary. Needed when importing as dependency.
 	//
 	//go:embed abi.json
-	f   embed.FS
+	f   []byte
 	ABI abi.ABI
 )
 
 func init() {
 	var err error
-	ABI, err = cmn.LoadABI(f, "abi.json")
+	ABI, err = abi.JSON(bytes.NewReader(f))
 	if err != nil {
 		panic(err)
 	}
@@ -77,6 +78,10 @@ func NewPrecompile(
 		bankKeeper:  bankKeeper,
 		erc20Keeper: erc20Keeper,
 	}
+}
+
+func (p Precompile) Name() string {
+	return "bank"
 }
 
 // RequiredGas calculates the precompiled contract's base gas rate.

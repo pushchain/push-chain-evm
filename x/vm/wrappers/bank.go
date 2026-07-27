@@ -34,26 +34,23 @@ func NewBankWrapper(
 // Bank wrapper own methods
 // ------------------------------------------------------------------------------------------
 
-// MintAmountToAccount converts the given amount into the evm coin scaling
-// the amount to the original decimals, then mints that amount to the provided account.
-func (w BankWrapper) MintAmountToAccount(ctx context.Context, recipientAddr sdk.AccAddress, amt *big.Int) error {
+func (w BankWrapper) SetBalance(ctx context.Context, account sdk.AccAddress, amt *big.Int) error {
 	coin := sdk.Coin{Denom: types.GetEVMCoinDenom(), Amount: sdkmath.NewIntFromBigInt(amt)}
 
 	convertedCoin, err := types.ConvertEvmCoinDenomToExtendedDenom(coin)
 	if err != nil {
-		return errors.Wrap(err, "failed to mint coin to account in bank wrapper")
+		return errors.Wrap(err, "failed to set coins in bank wrapper")
 	}
 
-	coinsToMint := sdk.Coins{convertedCoin}
-	if err := w.MintCoins(ctx, types.ModuleName, coinsToMint); err != nil {
-		return errors.Wrap(err, "failed to mint coins to account in bank wrapper")
-	}
-
-	return w.BankKeeper.SendCoinsFromModuleToAccount(ctx, types.ModuleName, recipientAddr, coinsToMint)
+	return w.UncheckedSetBalance(ctx, account, convertedCoin)
 }
 
 // BurnAmountFromAccount converts the given amount into the evm coin scaling
 // the amount to the original decimals, then burns that quantity from the provided account.
+//
+// push-chain: upstream removed this helper in cosmos/evm v0.7.0, but push-chain's
+// baseFeeBurn (see Keeper.RefundGas) still needs it to burn `baseFee * gasUsed`
+// from the sender. Retained here with the exact v0.6.0 semantics.
 func (w BankWrapper) BurnAmountFromAccount(ctx context.Context, account sdk.AccAddress, amt *big.Int) error {
 	coin := sdk.Coin{Denom: types.GetEVMCoinDenom(), Amount: sdkmath.NewIntFromBigInt(amt)}
 

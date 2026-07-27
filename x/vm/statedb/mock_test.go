@@ -10,8 +10,7 @@ import (
 	"github.com/cosmos/evm/x/vm/statedb"
 	"github.com/cosmos/evm/x/vm/types"
 
-	storetypes "cosmossdk.io/store/types"
-
+	storetypes "github.com/cosmos/cosmos-sdk/store/v2/types"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 )
 
@@ -120,6 +119,6 @@ func (k MockKeeper) Clone() *MockKeeper {
 	return &MockKeeper{accounts, codes}
 }
 
-func (k MockKeeper) KVStoreKeys() map[string]*storetypes.KVStoreKey {
-	return make(map[string]*storetypes.KVStoreKey)
+func (k MockKeeper) KVStoreKeys() map[string]storetypes.StoreKey {
+	return make(map[string]storetypes.StoreKey)
 }

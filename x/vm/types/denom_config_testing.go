@@ -3,13 +3,13 @@
 // Its primary purpose is to be used during application initialization.
 
 //go:build test
-// +build test
 
 package types
 
 import (
 	"errors"
 	"fmt"
+	"sync"
 
 	sdk "github.com/cosmos/cosmos-sdk/types"
 )
@@ -18,9 +18,14 @@ import (
 // can only be set via `EVMConfigurator` before starting the app.
 var testingEvmCoinInfo *EvmCoinInfo
 
+// testingEvmCoinInfoMu protects concurrent access to testingEvmCoinInfo
+var testingEvmCoinInfoMu sync.RWMutex
+
 // SetDefaultEvmCoinInfo sets the default EVM coin info to be used as fallback.
 // This should be called during keeper initialization.
 func SetDefaultEvmCoinInfo(coinInfo EvmCoinInfo) {
+	testingEvmCoinInfoMu.Lock()
+	defer testingEvmCoinInfoMu.Unlock()
 	testingEvmCoinInfo = &coinInfo
 }
 
@@ -61,8 +66,18 @@ func setDisplayDenom(displayDenom string) error {
 	return nil
 }
 
-// getTestingEvmCoinInfo returns the configured testing coin info, falling back to
-// a non-nil zero value when it is momentarily nil.
+// GetCoinInfo returns EvmCoinInfo if set, otherwise panics.
+func GetCoinInfo() EvmCoinInfo {
+	testingEvmCoinInfoMu.RLock()
+	defer testingEvmCoinInfoMu.RUnlock()
+	if testingEvmCoinInfo == nil {
+		panic("global testingEvmCoinInfo is not set yet!")
+	}
+	return *testingEvmCoinInfo
+}
+
+// getTestingEvmCoinInfo returns a copy of the configured testing coin info,
+// falling back to a zero value when it is momentarily nil.
 //
 // NOTE (push-chain): the configurator resets the global to nil (resetEVMCoinInfo)
 // before re-setting it between test cases, creating a brief window in which a
@@ -70,11 +85,14 @@ func setDisplayDenom(displayDenom string) error {
 // test network — can read it and panic. This mirrors the production
 // getEvmCoinInfo() nil-guard in denom_config.go (added for the same class of
 // "coin info accessed before initialization" issue). Test-only (build tag test).
-func getTestingEvmCoinInfo() *EvmCoinInfo {
+// The read lock is upstream v0.7.0's race fix; the nil fallback is push-chain's.
+func getTestingEvmCoinInfo() EvmCoinInfo {
+	testingEvmCoinInfoMu.RLock()
+	defer testingEvmCoinInfoMu.RUnlock()
 	if testingEvmCoinInfo == nil {
-		return &EvmCoinInfo{}
+		return EvmCoinInfo{}
 	}
-	return testingEvmCoinInfo
+	return *testingEvmCoinInfo
 }
 
 // GetEVMCoinDecimals returns the decimals used in the representation of the EVM
@@ -100,6 +118,9 @@ func GetEVMCoinDisplayDenom() string {
 
 // setTestingEVMCoinInfo allows to define denom and decimals of the coin used in the EVM.
 func setTestingEVMCoinInfo(eci EvmCoinInfo) error {
+	testingEvmCoinInfoMu.Lock()
+	defer testingEvmCoinInfoMu.Unlock()
+
 	if testingEvmCoinInfo != nil {
 		return errors.New("testing EVM coin info already set. Make sure you run the configurator's ResetTestConfig before trying to set a new evm coin info")
 	}
@@ -126,5 +147,7 @@ func setTestingEVMCoinInfo(eci EvmCoinInfo) error {
 
 // resetEVMCoinInfo resets to nil the testingEVMCoinInfo
 func resetEVMCoinInfo() {
+	testingEvmCoinInfoMu.Lock()
+	defer testingEvmCoinInfoMu.Unlock()
 	testingEvmCoinInfo = nil
 }

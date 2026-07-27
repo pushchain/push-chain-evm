@@ -10,13 +10,12 @@ import (
 
 	"github.com/cosmos/evm/ante/evm"
 	"github.com/cosmos/evm/ante/types"
-	"github.com/cosmos/evm/config"
 	"github.com/cosmos/evm/encoding"
 	testconstants "github.com/cosmos/evm/testutil/constants"
 	feemarkettypes "github.com/cosmos/evm/x/feemarket/types"
 	evmtypes "github.com/cosmos/evm/x/vm/types"
 
-	"cosmossdk.io/log"
+	"cosmossdk.io/log/v2"
 	"cosmossdk.io/math"
 
 	codectypes "github.com/cosmos/cosmos-sdk/codec/types"
@@ -34,7 +33,7 @@ func TestSDKTxFeeChecker(t *testing.T) {
 	//      with extension option
 	//      without extension option
 	//      london hardfork enableness
-	chainID := uint64(config.EighteenDecimalsChainID)
+	chainID := uint64(testconstants.EighteenDecimalsChainID)
 	encodingConfig := encoding.MakeConfig(chainID) //nolint:staticcheck // this is used
 
 	configurator := evmtypes.NewEVMConfigurator()
@@ -47,7 +46,7 @@ func TestSDKTxFeeChecker(t *testing.T) {
 	err := configurator.
 		WithExtendedEips(evmtypes.DefaultCosmosEVMActivators).
 		// NOTE: we're using the 18 decimals default for the example chain
-		WithEVMCoinInfo(config.ChainsCoinInfo[chainID]).
+		WithEVMCoinInfo(testconstants.ChainsCoinInfo[chainID]).
 		Configure()
 	require.NoError(t, err)
 	if err != nil {

@@ -3,7 +3,6 @@
 // Its primary purpose is to be used during application initialization.
 
 //go:build !test
-// +build !test
 
 package types
 
@@ -23,7 +22,7 @@ func (ec *EVMConfigurator) Configure() error {
 		return fmt.Errorf("error configuring EVMConfigurator: already sealed and cannot be modified")
 	}
 
-	if err := setEVMCoinInfo(ec.evmCoinInfo); err != nil {
+	if err := setCoinInfo(ec.evmCoinInfo); err != nil {
 		return err
 	}
 
@@ -48,7 +47,7 @@ func (ec *EVMConfigurator) ResetTestConfig() {
 
 // GetEthChainConfig returns the `chainConfig` used in the EVM (geth type).
 func GetEthChainConfig() *geth.ChainConfig {
-	return chainConfig.EthereumConfig(nil)
+	return gethChainConfig
 }
 
 // GetChainConfig returns the `chainConfig`.
@@ -74,7 +73,11 @@ func SetChainConfig(cc *ChainConfig) error {
 	if err := newConfig.Validate(); err != nil {
 		return err
 	}
+
 	chainConfig = newConfig
+
+	gethChainConfig = nil
+	gethChainConfig = newConfig.EthereumConfig(nil)
 
 	return nil
 }

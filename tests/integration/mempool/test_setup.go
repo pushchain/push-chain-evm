@@ -5,6 +5,7 @@ import (
 
 	"github.com/stretchr/testify/suite"
 
+	evmmempool "github.com/cosmos/evm/mempool"
 	testconstants "github.com/cosmos/evm/testutil/constants"
 	"github.com/cosmos/evm/testutil/integration/evm/factory"
 	"github.com/cosmos/evm/testutil/integration/evm/grpc"
@@ -42,6 +43,33 @@ func (s *IntegrationTestSuite) SetupTest() {
 	s.SetupTestWithChainID(testconstants.ExampleChainID)
 }
 
+// TearDownTest cleans up resources after each test.
+func (s *IntegrationTestSuite) TearDownTest() {
+	if s.network != nil && s.network.App != nil {
+		// Close the mempool to stop background goroutines before the next test
+		// This prevents race conditions when global test state is reset in SetupTest
+		if mp := s.network.App.GetMempool(); mp != nil {
+			if closer, ok := mp.(interface{ Close() error }); ok {
+				if err := closer.Close(); err != nil {
+					s.T().Logf("Warning: failed to close mempool: %v", err)
+				}
+
+				// Wait for goroutines to fully exit before next test starts
+				// The mempool spawns background goroutines that may still be accessing
+				// global config (like EVMCoinInfo) even after Close() returns.
+				// We need to ensure these goroutines have completely finished before
+				// the next test's SetupTest() resets the global config.
+				// A longer wait time reduces the chance of race conditions where:
+				// - Old test's goroutine is still reading global config
+				// - New test's SetupTest() is resetting global config
+				// Under race detector and high system load (full test suite), goroutines
+				// may take longer to fully exit. 2 seconds provides adequate buffer.
+				time.Sleep(2 * time.Second)
+			}
+		}
+	}
+}
+
 // SetupTestWithChainID initializes the test environment with a specific chain ID.
 func (s *IntegrationTestSuite) SetupTestWithChainID(chainID testconstants.ChainID) {
 	s.keyring = keyring.New(20)
@@ -53,8 +81,11 @@ func (s *IntegrationTestSuite) SetupTestWithChainID(chainID testconstants.ChainI
 	options = append(options, s.options...)
 
 	nw := network.NewUnitTestNetwork(s.create, options...)
+	s.network = nw
+
 	gh := grpc.NewIntegrationHandler(nw)
 	tf := factory.New(nw, gh)
+	s.factory = tf
 
 	// Advance to block 2+ where mempool is designed to operate
 	// This ensures proper headers, StateDB, and fee market initialization
@@ -63,11 +94,11 @@ func (s *IntegrationTestSuite) SetupTestWithChainID(chainID testconstants.ChainI
 	err = nw.NextBlock()
 	s.Require().NoError(err)
 
-	// Wait for mempool async reset goroutines to complete
-	// NextBlock() triggers chain head events that start async goroutines to reset
-	// the mempool state. Without this wait, tests can start before the reset completes,
-	// causing race conditions with stale mempool state.
-	time.Sleep(100 * time.Millisecond)
+	// Synchronize mempool state with the blockchain after block progression
+	// Directly call Reset on subpools to ensure synchronous completion
+	// This prevents race conditions by waiting for the reset to complete
+	// before continuing with test setup
+	s.TrySetupMempool()
 
 	// Ensure mempool is in ready state by verifying block height
 	s.Require().Equal(int64(3), nw.GetContext().BlockHeight())
@@ -80,8 +111,28 @@ func (s *IntegrationTestSuite) SetupTestWithChainID(chainID testconstants.ChainI
 	initialCount := mempool.CountTx()
 	s.Require().Equal(0, initialCount, "mempool should be empty initially")
 
-	s.network = nw
-	s.factory = tf
+	// Enforces deterministic mempool state for tests
+	evmmempool.AllowUnsafeSyncInsert = true
+}
+
+// TrySetupMempool sets up the Mempool, if it is the configured mempool on the suite.
+func (s *IntegrationTestSuite) TrySetupMempool() {
+	mp, ok := s.network.App.GetMempool().(*evmmempool.Mempool)
+	if !ok {
+		return
+	}
+
+	blockchain := mp.GetBlockchain()
+	txPool := mp.GetTxPool()
+
+	oldHead := blockchain.CurrentBlock()
+	blockchain.NotifyNewBlock()
+	newHead := blockchain.CurrentBlock()
+
+	mp.RecheckCosmosTxs(newHead)
+	for _, subpool := range txPool.Subpools {
+		subpool.Reset(oldHead, newHead)
+	}
 }
 
 // FundAccount funds an account with a specific amount of a given denomination.

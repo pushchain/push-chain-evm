@@ -76,7 +76,7 @@ func PrepareEIP712CosmosTx(
 	fee := legacytx.NewStdFee(txArgs.Gas, txArgs.Fees) //nolint:staticcheck // check against deprecated type
 
 	msgs := txArgs.Msgs
-	data := legacytx.StdSignBytes(ctx.ChainID(), accNumber, nonce, 0, fee, msgs, "") //nolint:staticcheck // check against deprecated type
+	data := legacytx.StdSignBytes(ctx.ChainID(), accNumber, nonce, 0, fee, msgs, "") //nolint:staticcheck // TODO: fix
 
 	typedDataArgs := typedDataArgs{
 		chainID:        args.EVMChainID,

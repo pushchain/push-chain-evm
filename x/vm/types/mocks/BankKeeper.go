@@ -17,6 +17,24 @@ type BankKeeper struct {
 	mock.Mock
 }
 
+// BlockedAddr provides a mock function with given fields: addr
+func (_m *BankKeeper) BlockedAddr(addr types.AccAddress) bool {
+	ret := _m.Called(addr)
+
+	if len(ret) == 0 {
+		panic("no return value specified for BlockedAddr")
+	}
+
+	var r0 bool
+	if rf, ok := ret.Get(0).(func(types.AccAddress) bool); ok {
+		r0 = rf(addr)
+	} else {
+		r0 = ret.Get(0).(bool)
+	}
+
+	return r0
+}
+
 // BurnCoins provides a mock function with given fields: ctx, moduleName, amt
 func (_m *BankKeeper) BurnCoins(ctx context.Context, moduleName string, amt types.Coins) error {
 	ret := _m.Called(ctx, moduleName, amt)
@@ -134,6 +152,26 @@ func (_m *BankKeeper) IterateTotalSupply(ctx context.Context, cb func(types.Coin
 	_m.Called(ctx, cb)
 }
 
+// LockedCoins provides a mock function with given fields: ctx, addr
+func (_m *BankKeeper) LockedCoins(ctx context.Context, addr types.AccAddress) types.Coins {
+	ret := _m.Called(ctx, addr)
+
+	if len(ret) == 0 {
+		panic("no return value specified for LockedCoins")
+	}
+
+	var r0 types.Coins
+	if rf, ok := ret.Get(0).(func(context.Context, types.AccAddress) types.Coins); ok {
+		r0 = rf(ctx, addr)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(types.Coins)
+		}
+	}
+
+	return r0
+}
+
 // MintCoins provides a mock function with given fields: ctx, moduleName, amt
 func (_m *BankKeeper) MintCoins(ctx context.Context, moduleName string, amt types.Coins) error {
 	ret := _m.Called(ctx, moduleName, amt)
@@ -188,12 +226,48 @@ func (_m *BankKeeper) SendCoinsFromAccountToModule(ctx context.Context, senderAd
 	return r0
 }
 
+// SendCoinsFromAccountToModuleVirtual provides a mock function with given fields: ctx, senderAddr, recipientModule, amt
+func (_m *BankKeeper) SendCoinsFromAccountToModuleVirtual(ctx context.Context, senderAddr types.AccAddress, recipientModule string, amt types.Coins) error {
+	ret := _m.Called(ctx, senderAddr, recipientModule, amt)
+
+	if len(ret) == 0 {
+		panic("no return value specified for SendCoinsFromAccountToModuleVirtual")
+	}
+
+	var r0 error
+	if rf, ok := ret.Get(0).(func(context.Context, types.AccAddress, string, types.Coins) error); ok {
+		r0 = rf(ctx, senderAddr, recipientModule, amt)
+	} else {
+		r0 = ret.Error(0)
+	}
+
+	return r0
+}
+
 // SendCoinsFromModuleToAccount provides a mock function with given fields: ctx, senderModule, recipientAddr, amt
 func (_m *BankKeeper) SendCoinsFromModuleToAccount(ctx context.Context, senderModule string, recipientAddr types.AccAddress, amt types.Coins) error {
 	ret := _m.Called(ctx, senderModule, recipientAddr, amt)
 
 	if len(ret) == 0 {
 		panic("no return value specified for SendCoinsFromModuleToAccount")
+	}
+
+	var r0 error
+	if rf, ok := ret.Get(0).(func(context.Context, string, types.AccAddress, types.Coins) error); ok {
+		r0 = rf(ctx, senderModule, recipientAddr, amt)
+	} else {
+		r0 = ret.Error(0)
+	}
+
+	return r0
+}
+
+// SendCoinsFromModuleToAccountVirtual provides a mock function with given fields: ctx, senderModule, recipientAddr, amt
+func (_m *BankKeeper) SendCoinsFromModuleToAccountVirtual(ctx context.Context, senderModule string, recipientAddr types.AccAddress, amt types.Coins) error {
+	ret := _m.Called(ctx, senderModule, recipientAddr, amt)
+
+	if len(ret) == 0 {
+		panic("no return value specified for SendCoinsFromModuleToAccountVirtual")
 	}
 
 	var r0 error
@@ -229,12 +303,31 @@ func (_m *BankKeeper) SpendableCoin(ctx context.Context, addr types.AccAddress, 
 	return r0
 }
 
+// UncheckedSetBalance provides a mock function with given fields: ctx, addr, amt
+func (_m *BankKeeper) UncheckedSetBalance(ctx context.Context, addr types.AccAddress, amt types.Coin) error {
+	ret := _m.Called(ctx, addr, amt)
+
+	if len(ret) == 0 {
+		panic("no return value specified for UncheckedSetBalance")
+	}
+
+	var r0 error
+	if rf, ok := ret.Get(0).(func(context.Context, types.AccAddress, types.Coin) error); ok {
+		r0 = rf(ctx, addr, amt)
+	} else {
+		r0 = ret.Error(0)
+	}
+
+	return r0
+}
+
 // NewBankKeeper creates a new instance of BankKeeper. It also registers a testing interface on the mock and a cleanup function to assert the mocks expectations.
 // The first argument is typically a *testing.T value.
 func NewBankKeeper(t interface {
 	mock.TestingT
 	Cleanup(func())
-}) *BankKeeper {
+},
+) *BankKeeper {
 	mock := &BankKeeper{}
 	mock.Mock.Test(t)
 

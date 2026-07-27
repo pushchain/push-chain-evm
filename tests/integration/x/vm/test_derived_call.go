@@ -26,6 +26,17 @@ func findEvent(events []abcitypes.Event, eventType string) (abcitypes.Event, boo
 	return abcitypes.Event{}, false
 }
 
+// countEvents returns how many ABCI events of the given type are present.
+func countEvents(events []abcitypes.Event, eventType string) int {
+	n := 0
+	for _, e := range events {
+		if e.Type == eventType {
+			n++
+		}
+	}
+	return n
+}
+
 // TestDerivedEVMCallModuleSenderRequiresNonce checks the module-sender guard: a
 // derived call from a module account must carry a manual nonce (module accounts
 // have no auth sequence to draw from), and otherwise errors out before the EVM.
@@ -63,7 +74,6 @@ func (s *KeeperTestSuite) TestDerivedEVMCallWithDataEmitsDerivedTxEvents() {
 	ctx := s.Network.GetContext()
 	keeper := s.Network.App.GetEVMKeeper()
 
-	idxBefore := keeper.GetTxIndexTransient(ctx)
 	data, err := erc20ABI.Pack("balanceOf", from)
 	s.Require().NoError(err)
 
@@ -82,8 +92,14 @@ func (s *KeeperTestSuite) TestDerivedEVMCallWithDataEmitsDerivedTxEvents() {
 	ethEvent, ok := findEvent(abciEvents, evmtypes.EventTypeEthereumTx)
 	s.Require().True(ok, "derived call must emit an ethereum_tx event")
 	s.Require().NotEmpty(utils.GetEventAttributeValue(ethEvent, evmtypes.AttributeKeyEthereumTxHash))
-	s.Require().Equal(strconv.FormatUint(idxBefore, 10),
-		utils.GetEventAttributeValue(ethEvent, evmtypes.AttributeKeyTxIndex))
+	// The tx index attribute must be present and numeric: cosmos/evm v0.7.0
+	// renumbers it block-globally in types.PatchTxResponses, and an ethereum_tx
+	// event without this attribute would be skipped by that pass and so fall out
+	// of the shared eth-tx numbering.
+	rawIdx := utils.GetEventAttributeValue(ethEvent, evmtypes.AttributeKeyTxIndex)
+	s.Require().NotEmpty(rawIdx, "derived ethereum_tx event must carry a tx index attribute")
+	_, parseErr := strconv.ParseUint(rawIdx, 10, 64)
+	s.Require().NoError(parseErr, "tx index attribute must be a decimal integer")
 	s.Require().NotEmpty(utils.GetEventAttributeValue(ethEvent, evmtypes.AttributeKeyTxData))
 	s.Require().Equal(wevmos.Hex(),
 		utils.GetEventAttributeValue(ethEvent, evmtypes.AttributeKeyRecipient))
@@ -103,8 +119,15 @@ func (s *KeeperTestSuite) TestDerivedEVMCallWithDataEmitsDerivedTxEvents() {
 }
 
 // TestDerivedEVMCallWithDataAdvancesTxIndex verifies a committed derived call
-// advances the block-level eth-tx index — the shared counter that also drives
-// standard MsgEthereumTx ordering, so the next eth tx gets a unique index.
+// contributes exactly one ethereum_tx event to the block-global eth-tx
+// numbering — the shared ordering that also covers standard MsgEthereumTx, so
+// the next eth tx gets a unique index.
+//
+// cosmos/evm v0.7.0 removed the eth-tx-index transient this test used to read;
+// the index is now assigned block-globally by types.PatchTxResponses, whose
+// rewriteEthTxEventIndex advances one step per ethereum_tx event that carries
+// AttributeKeyTxIndex. Emitting exactly one such event is therefore the
+// v0.7.0 expression of the same invariant.
 func (s *KeeperTestSuite) TestDerivedEVMCallWithDataAdvancesTxIndex() {
 	s.SetupTest()
 
@@ -114,17 +137,20 @@ func (s *KeeperTestSuite) TestDerivedEVMCallWithDataAdvancesTxIndex() {
 	ctx := s.Network.GetContext()
 	keeper := s.Network.App.GetEVMKeeper()
 
-	idxBefore := keeper.GetTxIndexTransient(ctx)
 	data, err := erc20ABI.Pack("balanceOf", from)
 	s.Require().NoError(err)
+
+	before := countEvents(ctx.EventManager().Events().ToABCIEvents(), evmtypes.EventTypeEthereumTx)
 
 	_, err = keeper.DerivedEVMCallWithData(
 		ctx, from, &wevmos, data,
 		true, false, false, big.NewInt(0), big.NewInt(100_000), nil,
 	)
 	s.Require().NoError(err)
-	s.Require().Equal(idxBefore+1, keeper.GetTxIndexTransient(ctx),
-		"a committed derived call must advance the shared eth-tx index by one")
+
+	after := countEvents(ctx.EventManager().Events().ToABCIEvents(), evmtypes.EventTypeEthereumTx)
+	s.Require().Equal(before+1, after,
+		"a committed derived call must contribute exactly one ethereum_tx event to the shared eth-tx index")
 }
 
 // TestDerivedEVMCallWithDataGasless verifies the gasless flag zeroes the gas
@@ -161,8 +187,9 @@ func (s *KeeperTestSuite) TestDerivedEVMCallWithDataGasless() {
 
 // TestDerivedEVMCallWithDataRevertDoesNotMutateBloom is a regression test for F-2026-17738
 // (a reverted derived execution must not mutate the block bloom) and the failure half of
-// F-2026-17736 (failed execution must not commit). An ERC20 transfer from a zero-balance
-// account reverts; the call must surface the error and leave the block bloom untouched.
+// F-2026-17736 (failed execution must not commit). An ERC20 transfer of more than the
+// sender holds reverts; the call must surface the error and leave the block bloom
+// untouched.
 func (s *KeeperTestSuite) TestDerivedEVMCallWithDataRevertDoesNotMutateBloom() {
 	s.SetupTest()
 
@@ -172,10 +199,14 @@ func (s *KeeperTestSuite) TestDerivedEVMCallWithDataRevertDoesNotMutateBloom() {
 	ctx := s.Network.GetContext()
 	keeper := s.Network.App.GetEVMKeeper()
 
-	bloomBefore := keeper.GetBlockBloomTransient(ctx).Bytes()
+	bloomBefore := keeper.GetTxBloom(ctx).Bytes()
 
-	// transfer 1 token from a zero-balance account → ERC20 reverts.
-	data, err := erc20ABI.Pack("transfer", common.HexToAddress("0x000000000000000000000000000000000000dEaD"), big.NewInt(1))
+	// Transfer far more than the sender could hold → ERC20 reverts on insufficient
+	// balance. NOTE: the amount must exceed the sender's balance; under the v0.7.0
+	// test genesis the keyring accounts are pre-funded in this token, so the
+	// previous "transfer 1 from a zero-balance account" no longer reverts.
+	hugeAmt := new(big.Int).Lsh(big.NewInt(1), 200)
+	data, err := erc20ABI.Pack("transfer", common.HexToAddress("0x000000000000000000000000000000000000dEaD"), hugeAmt)
 	s.Require().NoError(err)
 
 	res, err := keeper.DerivedEVMCallWithData(
@@ -186,6 +217,6 @@ func (s *KeeperTestSuite) TestDerivedEVMCallWithDataRevertDoesNotMutateBloom() {
 	s.Require().NotNil(res)
 	s.Require().True(res.Failed(), "the EVM execution reverted")
 
-	s.Require().Equal(bloomBefore, keeper.GetBlockBloomTransient(ctx).Bytes(),
+	s.Require().Equal(bloomBefore, keeper.GetTxBloom(ctx).Bytes(),
 		"a reverted derived execution must not mutate the block bloom (F-2026-17738)")
 }

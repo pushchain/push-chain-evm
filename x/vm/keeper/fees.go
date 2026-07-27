@@ -1,11 +1,17 @@
 package keeper
 
 import (
+	"fmt"
 	"math/big"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core"
 	ethtypes "github.com/ethereum/go-ethereum/core/types"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+
+	evmtrace "github.com/cosmos/evm/trace"
+	"github.com/cosmos/evm/x/vm/types"
 
 	errorsmod "cosmossdk.io/errors"
 	sdkmath "cosmossdk.io/math"
@@ -13,6 +19,7 @@ import (
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	errortypes "github.com/cosmos/cosmos-sdk/types/errors"
 	authante "github.com/cosmos/cosmos-sdk/x/auth/ante"
+	authtypes "github.com/cosmos/cosmos-sdk/x/auth/types"
 )
 
 // CheckSenderBalance validates that the tx cost value is positive and that the
@@ -44,7 +51,12 @@ func (k *Keeper) DeductTxCostsFromUserBalance(
 	ctx sdk.Context,
 	fees sdk.Coins,
 	from common.Address,
-) error {
+) (err error) {
+	ctx, span := ctx.StartSpan(tracer, "DeductTxCostsFromUserBalance", trace.WithAttributes(
+		attribute.String("from", from.Hex()),
+		attribute.String("fees", fees.String()),
+	))
+	defer func() { evmtrace.EndSpanErr(span, err) }()
 	// fetch sender account
 	signerAcc, err := authante.GetSignerAcc(ctx, k.accountKeeper, from.Bytes())
 	if err != nil {
@@ -54,7 +66,12 @@ func (k *Keeper) DeductTxCostsFromUserBalance(
 	// Deduct fees from the user balance. Notice that it is used
 	// the bankWrapper to properly convert fees from the 18 decimals
 	// representation to the original one before calling into the bank keeper.
-	if err := authante.DeductFees(k.bankWrapper, ctx, signerAcc, fees); err != nil {
+	if k.virtualFeeCollection {
+		err = DeductFees(k.bankWrapper, k, ctx, signerAcc, fees)
+	} else {
+		err = authante.DeductFees(k.bankWrapper, ctx, signerAcc, fees)
+	}
+	if err != nil {
 		return errorsmod.Wrapf(err, "failed to deduct full gas cost %s from the user %s balance", fees, from)
 	}
 
@@ -115,4 +132,39 @@ func VerifyFee(
 	}
 
 	return sdk.Coins{{Denom: denom, Amount: sdkmath.NewIntFromBigInt(feeAmt)}}, nil
+}
+
+// DeductFees deducts fees from the given account.
+func DeductFees(bankKeeper types.BankKeeper, vmKeeper types.VMKeeper, ctx sdk.Context, acc sdk.AccountI, fees sdk.Coins) (err error) {
+	ctx, span := ctx.StartSpan(tracer, "DeductFees", trace.WithAttributes(
+		attribute.String("account", acc.GetAddress().String()),
+		attribute.String("fees", fees.String()),
+	))
+	defer func() { evmtrace.EndSpanErr(span, err) }()
+	if !fees.IsValid() {
+		return errorsmod.Wrapf(errortypes.ErrInsufficientFee, "invalid fee amount: %s", fees)
+	}
+	evmCoinInfo := vmKeeper.GetEvmCoinInfo(ctx)
+	for _, coin := range fees {
+		md, found := bankKeeper.GetDenomMetaData(ctx, coin.Denom)
+		if !found {
+			// DenomMetadata being set for the evm coin is enforced in genesis
+			continue
+		}
+		for _, du := range md.DenomUnits {
+			if du.Denom == evmCoinInfo.DisplayDenom && du.Exponent != types.EighteenDecimals.Uint32() {
+				panic(
+					fmt.Sprintf(
+						"Cannot use virtual fee collection for denom %s, which has a display denom that has %d exponent",
+						du.Denom, du.Exponent))
+			}
+		}
+	}
+
+	err = bankKeeper.SendCoinsFromAccountToModuleVirtual(ctx, acc.GetAddress(), authtypes.FeeCollectorName, fees)
+	if err != nil {
+		return errorsmod.Wrap(errortypes.ErrInsufficientFunds, err.Error())
+	}
+
+	return nil
 }

@@ -180,6 +180,43 @@ func TestParseTxResult(t *testing.T) {
 			},
 			nil,
 		},
+		{
+			"format 2, second event missing txIndex (msg_server)",
+			abci.ExecTxResult{
+				GasUsed: 21000,
+				Events: []abci.Event{
+					{Type: evmtypes.EventTypeEthereumTx, Attributes: []abci.EventAttribute{
+						{Key: "ethereumTxHash", Value: txHash.Hex()},
+						{Key: "txIndex", Value: "7"},
+					}},
+					{Type: evmtypes.EventTypeEthereumTx, Attributes: []abci.EventAttribute{
+						{Key: "amount", Value: "1000"},
+						{Key: "ethereumTxHash", Value: txHash.Hex()},
+						{Key: "txGasUsed", Value: "21000"},
+						{Key: "txHash", Value: "14A84ED06282645EFBF080E0B7ED80D8D8D6A36337668A12B5F229F81CDD3F57"},
+						{Key: "recipient", Value: "0x775b87ef5D82ca211811C1a02CE0fE0CA3a455d7"},
+					}},
+				},
+			},
+			[]*ParsedTx{
+				{
+					MsgIndex:   0,
+					Hash:       txHash,
+					EthTxIndex: 7,
+					GasUsed:    21000,
+					Failed:     false,
+					// push-chain: ParsedTx carries extra derived-transaction fields
+					// that upstream's struct does not have, and fillTxAttribute
+					// populates them from the continuation event above. They are inert
+					// for a non-derived tx — ParseTxBlockResult only builds a
+					// TxResultAdditionalFields when Type == DerivedTxType (99), and
+					// Type is 0 here — so this only records what the parser fills in.
+					TxHash:    "14A84ED06282645EFBF080E0B7ED80D8D8D6A36337668A12B5F229F81CDD3F57",
+					Amount:    big.NewInt(1000),
+					Recipient: common.HexToAddress("0x775b87ef5D82ca211811C1a02CE0fE0CA3a455d7"),
+				},
+			},
+		},
 	}
 
 	for _, tc := range testCases {
