@@ -1,6 +1,7 @@
 package backend
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -13,7 +14,7 @@ import (
 	rpctypes "github.com/cosmos/evm/rpc/types"
 	evmtypes "github.com/cosmos/evm/x/vm/types"
 
-	"cosmossdk.io/log"
+	"cosmossdk.io/log/v2"
 
 	sdk "github.com/cosmos/cosmos-sdk/types"
 )
@@ -181,7 +182,7 @@ func (suite *BackendTestSuite) TestTraceTransaction() {
 			suite.backend.Indexer = indexer.NewKVIndexer(dbm.NewMemDB(), log.NewNopLogger(), suite.backend.ClientCtx)
 			err := suite.backend.Indexer.IndexBlock(tc.block, tc.responseBlock)
 			suite.Require().NoError(err)
-			_, err = suite.backend.TraceTransaction(txHash, nil)
+			_, err = suite.backend.TraceTransaction(context.Background(), txHash, nil)
 
 			if tc.expPass {
 				suite.Require().NoError(err)
@@ -247,7 +248,7 @@ func (suite *BackendTestSuite) TestTraceTransactionEthTxIndex() {
 	RegisterTraceTransactionWithPredecessors(queryClient, msgTarget, []*evmtypes.MsgEthereumTx{msgFirst})
 	RegisterConsensusParams(client, 1)
 
-	_, err = suite.backend.TraceTransaction(txHashTarget, nil)
+	_, err = suite.backend.TraceTransaction(context.Background(), txHashTarget, nil)
 	suite.Require().NoError(err)
 }
 
@@ -302,7 +303,7 @@ func (suite *BackendTestSuite) TestTraceTransactionMultiMsgSameCosmosTarget() {
 	RegisterTraceTransactionWithPredecessors(queryClient, msgTarget, []*evmtypes.MsgEthereumTx{msg1})
 	RegisterConsensusParams(client, 1)
 
-	_, err = suite.backend.TraceTransaction(hashTarget, nil)
+	_, err = suite.backend.TraceTransaction(context.Background(), hashTarget, nil)
 	suite.Require().NoError(err)
 }
 
@@ -348,7 +349,7 @@ func (suite *BackendTestSuite) TestTraceTransactionMultiMsgTargetIsThird() {
 	RegisterTraceTransactionWithPredecessors(queryClient, msgTarget, []*evmtypes.MsgEthereumTx{msg1, msg2})
 	RegisterConsensusParams(client, 1)
 
-	_, err = suite.backend.TraceTransaction(hashTarget, nil)
+	_, err = suite.backend.TraceTransaction(context.Background(), hashTarget, nil)
 	suite.Require().NoError(err)
 }
 
@@ -399,7 +400,7 @@ func (suite *BackendTestSuite) TestTraceTransactionMultiMsgCosmosAsPredecessor()
 	RegisterTraceTransactionWithPredecessors(queryClient, msgTarget, []*evmtypes.MsgEthereumTx{msg1, msg2})
 	RegisterConsensusParams(client, 1)
 
-	_, err = suite.backend.TraceTransaction(hashTarget, nil)
+	_, err = suite.backend.TraceTransaction(context.Background(), hashTarget, nil)
 	suite.Require().NoError(err)
 }
 
@@ -446,7 +447,7 @@ func (suite *BackendTestSuite) TestTraceTransactionThreeTxBlock() {
 	RegisterTraceTransactionWithPredecessors(queryClient, msgTarget, []*evmtypes.MsgEthereumTx{msg1, msg2, msg3})
 	RegisterConsensusParams(client, 1)
 
-	_, err = suite.backend.TraceTransaction(hashTarget, nil)
+	_, err = suite.backend.TraceTransaction(context.Background(), hashTarget, nil)
 	suite.Require().NoError(err)
 }
 
@@ -539,7 +540,7 @@ func (suite *BackendTestSuite) TestTraceTransactionDerivedTxAsPredecessor() {
 	RegisterTraceTransactionWithPredecessors(queryClient, msgTarget, []*evmtypes.MsgEthereumTx{msg1, derivedMsg})
 	RegisterConsensusParams(client, 1)
 
-	_, err = suite.backend.TraceTransaction(hashTarget, nil)
+	_, err = suite.backend.TraceTransaction(context.Background(), hashTarget, nil)
 	suite.Require().NoError(err)
 }
 
@@ -612,7 +613,7 @@ func (suite *BackendTestSuite) TestTraceTransactionDerivedTxAsTarget() {
 	RegisterTraceTransactionWithPredecessors(queryClient, derivedTargetMsg, []*evmtypes.MsgEthereumTx{msg1})
 	RegisterConsensusParams(client, 1)
 
-	_, err = suite.backend.TraceTransaction(hashDerivedTarget, nil)
+	_, err = suite.backend.TraceTransaction(context.Background(), hashDerivedTarget, nil)
 	suite.Require().NoError(err)
 }
 
@@ -686,7 +687,7 @@ func (suite *BackendTestSuite) TestTraceTransactionDerivedTargetInMultiDerivedCo
 	// transaction.MsgIndex=2.
 	var traceErr error
 	suite.Require().NotPanics(func() {
-		_, traceErr = suite.backend.TraceTransaction(hashD2, nil)
+		_, traceErr = suite.backend.TraceTransaction(context.Background(), hashD2, nil)
 	}, "tracing the 3rd derived EVM tx of a multi-derived Cosmos tx must not panic (F-2026-17754)")
 	suite.Require().NoError(traceErr)
 }
@@ -732,7 +733,7 @@ func (suite *BackendTestSuite) TestTraceTransactionFirstDerivedTargetInMultiDeri
 	RegisterTraceTransactionCapture(queryClient, &captured)
 	RegisterConsensusParams(client, 1)
 
-	_, err = suite.backend.TraceTransaction(hashD0, nil)
+	_, err = suite.backend.TraceTransaction(context.Background(), hashD0, nil)
 	suite.Require().NoError(err)
 	suite.Require().NotNil(captured)
 	suite.Require().Empty(captured.Predecessors, "first derived tx of a Cosmos tx has no predecessors")
@@ -785,7 +786,7 @@ func (suite *BackendTestSuite) TestTraceTransactionEvmTargetWithMultiDerivedPred
 	RegisterTraceTransactionCapture(queryClient, &captured)
 	RegisterConsensusParams(client, 1)
 
-	_, err = suite.backend.TraceTransaction(hashTarget, nil)
+	_, err = suite.backend.TraceTransaction(context.Background(), hashTarget, nil)
 	suite.Require().NoError(err)
 	suite.Require().NotNil(captured)
 
@@ -851,7 +852,7 @@ func (suite *BackendTestSuite) TestTraceTransactionDerivedTargetWithMixedPredece
 	RegisterTraceTransactionCapture(queryClient, &captured)
 	RegisterConsensusParams(client, 1)
 
-	_, err = suite.backend.TraceTransaction(hashD3, nil)
+	_, err = suite.backend.TraceTransaction(context.Background(), hashD3, nil)
 	suite.Require().NoError(err)
 	suite.Require().NotNil(captured)
 	suite.Require().Len(captured.Predecessors, 3, "predecessors must be [EVM, D1, D2]")
@@ -896,7 +897,7 @@ func (suite *BackendTestSuite) TestTraceTransactionSecondDerivedTargetOneMsgCarr
 	RegisterTraceTransactionCapture(queryClient, &captured)
 	RegisterConsensusParams(client, 1)
 
-	_, err = suite.backend.TraceTransaction(hashD2, nil)
+	_, err = suite.backend.TraceTransaction(context.Background(), hashD2, nil)
 	suite.Require().NoError(err)
 	suite.Require().NotNil(captured)
 	suite.Require().Len(captured.Predecessors, 1, "only the 1st derived tx (D1) precedes D2")
@@ -946,7 +947,7 @@ func (suite *BackendTestSuite) TestTraceTransactionThirdDerivedTargetOneMsgCarri
 	RegisterTraceTransactionCapture(queryClient, &captured)
 	RegisterConsensusParams(client, 1)
 
-	_, err = suite.backend.TraceTransaction(hashD3, nil)
+	_, err = suite.backend.TraceTransaction(context.Background(), hashD3, nil)
 	suite.Require().NoError(err)
 	suite.Require().NotNil(captured)
 	suite.Require().Len(captured.Predecessors, 2, "D1 and D2 precede D3")
@@ -987,7 +988,7 @@ func (suite *BackendTestSuite) TestTraceTransactionDerivedTargetViaKVIndexerHit(
 	RegisterTraceTransactionCapture(queryClient, &captured)
 	RegisterConsensusParams(client, 1)
 
-	_, err = suite.backend.TraceTransaction(hashD0, nil)
+	_, err = suite.backend.TraceTransaction(context.Background(), hashD0, nil)
 	suite.Require().NoError(err)
 	suite.Require().NotNil(captured)
 	suite.Require().Empty(captured.Predecessors, "only derived tx in the block has no predecessors")

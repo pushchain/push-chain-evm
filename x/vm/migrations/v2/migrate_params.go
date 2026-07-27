@@ -16,7 +16,7 @@
 package v2
 
 import (
-	storetypes "cosmossdk.io/store/types"
+	storetypes "github.com/cosmos/cosmos-sdk/store/v2/types"
 
 	"google.golang.org/protobuf/encoding/protowire"
 
@@ -162,7 +162,7 @@ func migrateParams(store storetypes.KVStore) error {
 	newParams := types.DefaultParams()
 	newParams.EvmDenom = old.evmDenom
 	newParams.ExtraEIPs = old.extraEIPs
-newParams.EVMChannels = old.evmChannels
+	newParams.EVMChannels = old.evmChannels
 	newParams.AccessControl = ac
 	newParams.ActiveStaticPrecompiles = old.activeStaticPrecompiles
 

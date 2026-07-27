@@ -2,6 +2,10 @@ package keeper
 
 import (
 	"github.com/ethereum/go-ethereum/common"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+
+	evmtrace "github.com/cosmos/evm/trace"
 
 	errorsmod "cosmossdk.io/errors"
 
@@ -9,9 +13,19 @@ import (
 	stakingtypes "github.com/cosmos/cosmos-sdk/x/staking/types"
 )
 
-// GetCoinbaseAddress returns the block proposer's validator operator address.
-func (k Keeper) GetCoinbaseAddress(ctx sdk.Context, proposerAddress sdk.ConsAddress) (common.Address, error) {
-	validator, err := k.stakingKeeper.GetValidatorByConsAddr(ctx, GetProposerAddress(ctx, proposerAddress))
+// GetCoinbaseAddress converts the block proposer's validator operator address to an Ethereum address
+// for use as block.coinbase in the EVM.
+func (k Keeper) GetCoinbaseAddress(ctx sdk.Context, proposerAddress sdk.ConsAddress) (_ common.Address, err error) {
+	ctx, span := ctx.StartSpan(tracer, "GetCoinbaseAddress", trace.WithAttributes(
+		attribute.String("proposer_address", proposerAddress.String()),
+	))
+	defer func() { evmtrace.EndSpanErr(span, err) }()
+	proposerAddress = GetProposerAddress(ctx, proposerAddress)
+	if len(proposerAddress) == 0 {
+		// it's ok that proposer address don't exsits in some contexts like CheckTx.
+		return common.Address{}, nil
+	}
+	validator, err := k.stakingKeeper.GetValidatorByConsAddr(ctx, proposerAddress)
 	if err != nil {
 		return common.Address{}, errorsmod.Wrapf(
 			stakingtypes.ErrNoValidatorFound,
@@ -21,8 +35,15 @@ func (k Keeper) GetCoinbaseAddress(ctx sdk.Context, proposerAddress sdk.ConsAddr
 		)
 	}
 
-	coinbase := common.BytesToAddress([]byte(validator.GetOperator()))
-	return coinbase, nil
+	bz, err := sdk.ValAddressFromBech32(validator.GetOperator())
+	if err != nil {
+		return common.Address{}, errorsmod.Wrapf(
+			err,
+			"failed to convert validator operator address %s to bytes",
+			validator.GetOperator(),
+		)
+	}
+	return common.BytesToAddress(bz), nil
 }
 
 // GetProposerAddress returns current block proposer's address when provided proposer address is empty.

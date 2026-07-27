@@ -1,7 +1,6 @@
 package common
 
 import (
-	"embed"
 	"fmt"
 	"math/big"
 	"reflect"
@@ -11,8 +10,6 @@ import (
 	"github.com/ethereum/go-ethereum/common/math"
 	ethtypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
-
-	contractutils "github.com/cosmos/evm/contracts/utils"
 )
 
 // MakeTopic converts a filter query argument into a filter topic.
@@ -110,6 +107,7 @@ func genIntType(rule int64, size uint) []byte {
 		topic = [common.HashLength]byte{255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255}
 	}
 	for i := uint(0); i < size; i++ {
+		// #nosec G115 -- low 8 bits of int64, size bounded by HashLength
 		topic[common.HashLength-i-1] = byte(rule >> (i * 8))
 	}
 	return topic[:]
@@ -127,19 +125,4 @@ func PackNum(value reflect.Value) []byte {
 	default:
 		panic("abi: fatal error")
 	}
-}
-
-// LoadABI read the ABI file described by the path and parse it as JSON.
-func LoadABI(fs embed.FS, path string) (abi.ABI, error) {
-	abiBz, err := fs.ReadFile(path)
-	if err != nil {
-		return abi.ABI{}, fmt.Errorf("error loading the ABI %s", err)
-	}
-
-	contract, err := contractutils.ConvertPrecompileHardhatBytesToCompiledContract(abiBz)
-	if err != nil {
-		return abi.ABI{}, fmt.Errorf(ErrInvalidABI, err)
-	}
-
-	return contract.ABI, nil
 }

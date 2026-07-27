@@ -145,6 +145,9 @@ func (e *RevertError) ErrorCode() int {
 }
 
 // ErrorData returns the hex encoded revert reason.
-func (e *RevertError) ErrorData() interface{} {
+// push-chain keeps `reason` as raw bytes (see NewExecErrorWithReason) and hex
+// encodes at this boundary, which yields the same JSON-RPC payload as upstream
+// v0.7.0's pre-encoded string field.
+func (e *RevertError) ErrorData() any {
 	return hexutil.Encode(e.reason)
 }

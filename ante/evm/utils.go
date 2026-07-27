@@ -26,7 +26,6 @@ type DecoratorUtils struct {
 	BaseFee            *big.Int
 	MempoolMinGasPrice sdkmath.LegacyDec
 	GlobalMinGasPrice  sdkmath.LegacyDec
-	BlockTxIndex       uint64
 	TxGasLimit         uint64
 	GasWanted          uint64
 	MinPriority        int64
@@ -66,14 +65,16 @@ func NewMonoDecoratorUtils(
 	// If it is already a 18 decimal token, this is a no-op.
 	mempoolMinGasPrice := evmtypes.ConvertAmountTo18DecimalsLegacy(ctx.MinGasPrices().AmountOf(evmDenom))
 
+	//#nosec G115 -- int overflow is not a concern here
+	signer := ethtypes.MakeSigner(ethCfg, blockHeight, uint64(ctx.BlockTime().Unix()))
+
 	return &DecoratorUtils{
 		EvmParams:          *evmParams,
 		Rules:              rules,
-		Signer:             ethtypes.MakeSigner(ethCfg, blockHeight, uint64(ctx.BlockTime().Unix())), //#nosec G115 -- int overflow is not a concern here
+		Signer:             signer,
 		BaseFee:            baseFee,
 		MempoolMinGasPrice: mempoolMinGasPrice,
 		GlobalMinGasPrice:  globalMinGasPrice,
-		BlockTxIndex:       ek.GetTxIndexTransient(ctx),
 		GasWanted:          0,
 		MinPriority:        int64(math.MaxInt64),
 		// TxGasLimit and TxFee are set to zero because they are updated

@@ -10,8 +10,11 @@ import (
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core"
 	ethtypes "github.com/ethereum/go-ethereum/core/types"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/cosmos/evm/server/config"
+	evmtrace "github.com/cosmos/evm/trace"
 	"github.com/cosmos/evm/x/vm/statedb"
 	"github.com/cosmos/evm/x/vm/types"
 
@@ -24,7 +27,14 @@ import (
 // CallEVM performs a smart contract method call using given args.
 // Note: if you call this from a precompile context, ensure that
 // you use the existing stateDB.
-func (k Keeper) CallEVM(ctx sdk.Context, stateDB *statedb.StateDB, abi abi.ABI, from, contract common.Address, commit, callFromPrecompile bool, gasCap *big.Int, method string, args ...interface{}) (*types.MsgEthereumTxResponse, error) {
+func (k Keeper) CallEVM(ctx sdk.Context, stateDB *statedb.StateDB, abi abi.ABI, from, contract common.Address, commit, callFromPrecompile bool, gasCap *big.Int, method string, args ...interface{}) (_ *types.MsgEthereumTxResponse, err error) {
+	ctx, span := ctx.StartSpan(tracer, "CallEVM", trace.WithAttributes(
+		attribute.String("from", from.Hex()),
+		attribute.String("contract", contract.Hex()),
+		attribute.String("method", method),
+		attribute.Bool("commit", commit),
+	))
+	defer func() { evmtrace.EndSpanErr(span, err) }()
 	data, err := abi.Pack(method, args...)
 	if err != nil {
 		return nil, errorsmod.Wrap(
@@ -43,10 +53,31 @@ func (k Keeper) CallEVM(ctx sdk.Context, stateDB *statedb.StateDB, abi abi.ABI, 
 // CallEVMWithData performs a smart contract method call using contract data.
 // Note: if you call this from a precompile context, ensure that
 // you use the existing stateDB.
-func (k Keeper) CallEVMWithData(ctx sdk.Context, stateDB *statedb.StateDB, from common.Address, contract *common.Address, data []byte, commit bool, callFromPrecompile bool, gasCap *big.Int) (*types.MsgEthereumTxResponse, error) {
+func (k Keeper) CallEVMWithData(ctx sdk.Context, stateDB *statedb.StateDB, from common.Address, contract *common.Address, data []byte, commit bool, callFromPrecompile bool, gasCap *big.Int) (_ *types.MsgEthereumTxResponse, err error) {
+	contractAddr := ""
+	if contract != nil {
+		contractAddr = contract.Hex()
+	}
+	ctx, span := ctx.StartSpan(tracer, "CallEVMWithData", trace.WithAttributes(
+		attribute.String("from", from.Hex()),
+		attribute.String("contract", contractAddr),
+		attribute.Bool("commit", commit),
+		attribute.Int("data_size", len(data)),
+	))
+	defer func() { evmtrace.EndSpanErr(span, err) }()
 	nonce, err := k.accountKeeper.GetSequence(ctx, from.Bytes())
 	if err != nil {
 		return nil, err
+	}
+
+	gasLimit := config.DefaultGasCap
+	if gasCap != nil && gasCap.Sign() > 0 {
+		if gasCap.BitLen() <= 64 {
+			provided := gasCap.Uint64()
+			if provided < gasLimit {
+				gasLimit = provided
+			}
+		}
 	}
 
 	msg := core.Message{
@@ -54,7 +85,7 @@ func (k Keeper) CallEVMWithData(ctx sdk.Context, stateDB *statedb.StateDB, from 
 		To:         contract,
 		Nonce:      nonce,
 		Value:      big.NewInt(0),
-		GasLimit:   config.DefaultGasCap,
+		GasLimit:   gasLimit,
 		GasPrice:   big.NewInt(0),
 		GasTipCap:  big.NewInt(0),
 		GasFeeCap:  big.NewInt(0),
@@ -189,18 +220,20 @@ func (k Keeper) DerivedEVMCallWithData(
 	}
 
 	msg := core.Message{
-		From:              from,
-		To:                contract,
-		Nonce:             nonce,
-		Value:             value,
-		GasLimit:          gasCap,
-		GasFeeCap:         big.NewInt(0),
-		GasTipCap:         big.NewInt(0),
-		GasPrice:          big.NewInt(0),
-		Data:              data,
-		AccessList:        ethtypes.AccessList{},
-		SkipNonceChecks:   !commit,
-		SkipFromEOACheck:  !commit,
+		From:            from,
+		To:              contract,
+		Nonce:           nonce,
+		Value:           value,
+		GasLimit:        gasCap,
+		GasFeeCap:       big.NewInt(0),
+		GasTipCap:       big.NewInt(0),
+		GasPrice:        big.NewInt(0),
+		Data:            data,
+		AccessList:      ethtypes.AccessList{},
+		SkipNonceChecks: !commit,
+		// geth 1.17 folded SkipFromEOACheck into SkipTransactionChecks, which
+		// also skips the protocol tx gas-limit check.
+		SkipTransactionChecks: !commit,
 	}
 	tx := ethtypes.NewTx(&ethtypes.DynamicFeeTx{
 		Nonce:     msg.Nonce,
@@ -302,22 +335,27 @@ func (k Keeper) DerivedEVMCallWithData(
 			),
 		})
 
-		// Only successful executions contribute to the block bloom / log size.
+		// Only successful executions contribute to the block bloom.
 		// res.Logs is empty on a revert, so a failed tx never touches the bloom.
+		//
+		// v0.7.0 replaced the block-level bloom transient with a per-(txIndex,
+		// msgIndex) object-store entry that EndBlock ORs together
+		// (Keeper.CollectTxBloom). AddTxBloom rather than SetTxBloom is used here
+		// because one Cosmos message can emit several derived EVM txs, which all
+		// share the same object-store key and would otherwise overwrite each other.
 		if !res.Failed() {
 			logs := types.LogsToEthereum(res.Logs)
 			if len(logs) > 0 {
-				bloom := k.GetBlockBloomTransient(ctx)
-				bloom.Or(bloom, big.NewInt(0).SetBytes(ethtypes.CreateBloom(&ethtypes.Receipt{Logs: logs}).Bytes()))
-				bloomReceipt := ethtypes.BytesToBloom(bloom.Bytes())
-				k.SetBlockBloomTransient(ctx, bloomReceipt.Big())
-				k.SetLogSizeTransient(ctx, (k.GetLogSizeTransient(ctx))+uint64(len(logs)))
+				k.AddTxBloom(ctx, new(big.Int).SetBytes(logsBloom(logs)))
 			}
 		}
 
-		// Advance the block-level eth tx index so the next eth tx (derived or a
-		// standard MsgEthereumTx) gets a fresh, unique index. Mirrors ApplyTransaction.
-		k.SetTxIndexTransient(ctx, uint64(txConfig.TxIndex)+1)
+		// NOTE: the log index and the shared monotonic eth-tx index are no longer
+		// tracked here. v0.7.0 assigns both block-globally in
+		// types.PatchTxResponses, whose rewriteEthTxEventIndex renumbers every
+		// ethereum_tx event carrying AttributeKeyTxIndex — which includes the
+		// derived-tx event emitted above. That subsumes the SetTxIndexTransient /
+		// SetLogSizeTransient accounting this branch used to do by hand.
 	}
 
 	if res.Failed() {

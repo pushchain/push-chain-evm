@@ -21,7 +21,7 @@ import (
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	authtx "github.com/cosmos/cosmos-sdk/x/auth/tx"
 
-	"cosmossdk.io/log"
+	"cosmossdk.io/log/v2"
 )
 
 // TestMain initializes the global EVM chain config required by NewBackend.

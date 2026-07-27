@@ -6,51 +6,83 @@ import (
 	"testing"
 
 	"github.com/cosmos/evm/tests/systemtests/accountabstraction"
-	"github.com/cosmos/evm/tests/systemtests/mempool"
-
+	"github.com/cosmos/evm/tests/systemtests/chainupgrade"
 	"github.com/cosmos/evm/tests/systemtests/eip712"
 
-	"cosmossdk.io/systemtests"
+	"github.com/cosmos/evm/tests/systemtests/mempool"
+	"github.com/cosmos/evm/tests/systemtests/suite"
+
+	"github.com/cosmos/cosmos-sdk/tools/systemtests"
 )
 
 func TestMain(m *testing.M) {
 	systemtests.RunTests(m)
 }
 
-func TestCosmosTxCompat(t *testing.T) {
-	mempool.TestCosmosTxsCompatibility(t)
+/*
+ * Mempool Tests
+ */
+func TestMempoolTxsOrdering(t *testing.T) {
+	suite.RunWithSharedSuite(t, mempool.RunTxsOrdering, suite.MempoolArgs()...)
 }
 
-// Mempool Tests
-func TestTxsOrdering(t *testing.T) {
-	mempool.TestTxsOrdering(t)
+func TestMempoolTxsReplacement(t *testing.T) {
+	suite.RunWithSharedSuite(t, mempool.RunTxsReplacement, suite.MempoolArgs()...)
 }
 
-func TestTxsReplacement(t *testing.T) {
-	mempool.TestTxsReplacement(t)
-	mempool.TestTxsReplacementWithCosmosTx(t)
-	mempool.TestMixedTxsReplacementLegacyAndDynamicFee(t)
+func TestMempoolTxsReplacementWithCosmosTx(t *testing.T) {
+	suite.RunWithSharedSuite(t, mempool.RunTxsReplacementWithCosmosTx, suite.MempoolArgs()...)
 }
 
-func TestExceptions(t *testing.T) {
-	mempool.TestTxRebroadcasting(t)
-	mempool.TestMinimumGasPricesZero(t)
+func TestMempoolMixedTxsReplacementLegacyAndDynamicFee(t *testing.T) {
+	suite.RunWithSharedSuite(t, mempool.RunMixedTxsReplacementLegacyAndDynamicFee, suite.MempoolMinGasPriceZeroArgs()...)
 }
 
-// Account Abstraction Tests
-func TestEIP7702(t *testing.T) {
-	accountabstraction.TestEIP7702(t)
+func TestMempoolTxBroadcasting(t *testing.T) {
+	suite.RunWithSharedSuite(t, mempool.RunTxBroadcasting, suite.MempoolArgs()...)
 }
 
-// EIP-712 Tests
+func TestMempoolMinimumGasPricesZero(t *testing.T) {
+	suite.RunWithSharedSuite(t, mempool.RunMinimumGasPricesZero, suite.MempoolArgs()...)
+}
+
+func TestMempoolCosmosTxsCompatibility(t *testing.T) {
+	suite.RunWithSharedSuite(t, mempool.RunCosmosTxsCompatibility, suite.MempoolArgs()...)
+}
+
+func TestMempoolSetCode7702QueuedTxPromotion(t *testing.T) {
+	suite.RunWithSharedSuite(t, mempool.RunSetCode7702QueuedTxPromotion, suite.MempoolArgs()...)
+}
+
+// /*
+// * EIP-712 Tests
+// */
 func TestEIP712BankSend(t *testing.T) {
-	eip712.TestEIP712BankSend(t)
+	suite.RunWithSharedSuite(t, eip712.RunEIP712BankSend)
 }
 
 func TestEIP712BankSendWithBalanceCheck(t *testing.T) {
-	eip712.TestEIP712BankSendWithBalanceCheck(t)
+	suite.RunWithSharedSuite(t, eip712.RunEIP712BankSendWithBalanceCheck)
 }
 
 func TestEIP712MultipleBankSends(t *testing.T) {
-	eip712.TestEIP712MultipleBankSends(t)
+	suite.RunWithSharedSuite(t, eip712.RunEIP712MultipleBankSends)
+}
+
+/*
+* Account Abstraction Tests
+ */
+func TestAccountAbstractionEIP7702(t *testing.T) {
+	suite.RunWithSharedSuite(t, accountabstraction.RunEIP7702)
+}
+
+func TestAccountAbstractionEIP7702SameBlock(t *testing.T) {
+	suite.RunWithSharedSuite(t, accountabstraction.RunEIP7702SameBlock)
+}
+
+/*
+* Chain Upgrade Tests
+ */
+func TestChainUpgrade(t *testing.T) {
+	suite.RunWithSharedSuite(t, chainupgrade.RunChainUpgrade)
 }

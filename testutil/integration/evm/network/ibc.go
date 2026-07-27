@@ -3,7 +3,7 @@ package network
 import (
 	"testing"
 
-	ibctesting "github.com/cosmos/ibc-go/v10/testing"
+	ibctesting "github.com/cosmos/ibc-go/v11/testing"
 )
 
 // GetIBCChain returns a TestChain instance for the given network.
@@ -11,13 +11,17 @@ import (
 // The keyring should be used instead.
 func (n *IntegrationNetwork) GetIBCChain(t *testing.T, coord *ibctesting.Coordinator) *ibctesting.TestChain {
 	t.Helper()
+	app, ok := n.app.(ibctesting.TestingApp)
+	if !ok {
+		panic("network app does not implement ibctesting.TestingApp")
+	}
 	return &ibctesting.TestChain{
 		TB:          t,
 		Coordinator: coord,
 		ChainID:     n.GetChainID(),
-		App:         n.app,
-		TxConfig:    n.app.GetTxConfig(),
-		Codec:       n.app.AppCodec(),
+		App:         app,
+		TxConfig:    app.GetTxConfig(),
+		Codec:       app.AppCodec(),
 		Vals:        n.valSet,
 		NextVals:    n.valSet,
 		Signers:     n.valSigners,

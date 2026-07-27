@@ -2,6 +2,7 @@ package backend
 
 import (
 	"bufio"
+	"context"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -83,7 +84,8 @@ func (s *TestSuite) SetupTest() {
 
 	nw := network.New(s.create, s.options...)
 	encodingConfig := nw.GetEncodingConfig()
-	clientCtx := client.Context{}.WithChainID(ChainID.ChainID).
+	clientCtx := client.Context{}.
+		WithChainID(ChainID.ChainID).
 		WithHeight(1).
 		WithTxConfig(encodingConfig.TxConfig).
 		WithCodec(encodingConfig.Codec).
@@ -92,20 +94,29 @@ func (s *TestSuite) SetupTest() {
 		WithAccountRetriever(client.TestAccountRetriever{Accounts: accounts}).
 		WithClient(mocks.NewClient(s.T()))
 
-	allowUnprotectedTxs := false
 	idxer := indexer.NewKVIndexer(dbm.NewMemDB(), ctx.Logger, clientCtx)
 
-	s.backend = rpcbackend.NewBackend(ctx, ctx.Logger, clientCtx, allowUnprotectedTxs, idxer, nil)
+	mempool := NewEvmMempoolMock(s.T())
+
+	s.backend = rpcbackend.NewBackend(ctx, clientCtx, idxer, mempool, rpcbackend.WithLogger(ctx.Logger))
 	s.backend.Cfg.JSONRPC.GasCap = 0
 	s.backend.Cfg.JSONRPC.EVMTimeout = 0
 	s.backend.Cfg.JSONRPC.AllowInsecureUnlock = true
 	s.backend.Cfg.EVM.EVMChainID = ChainID.EVMChainID
 	s.backend.QueryClient.QueryClient = mocks.NewEVMQueryClient(s.T())
 	s.backend.QueryClient.FeeMarket = mocks.NewFeeMarketQueryClient(s.T())
-	s.backend.Ctx = rpctypes.ContextWithHeight(1)
 
 	// Add codec
 	s.backend.ClientCtx.Codec = encodingConfig.Codec
+}
+
+// Ctx returns a context with height set for testing
+func (s *TestSuite) Ctx() context.Context {
+	return rpctypes.NewContextWithHeight(1)
+}
+
+func (s *TestSuite) Mempool() *mocks.Mempool {
+	return s.backend.Mempool.(*mocks.Mempool)
 }
 
 // buildEthereumTx returns an example legacy Ethereum transaction
@@ -193,7 +204,7 @@ func (s *TestSuite) buildEthBlock(
 
 	// 1) Gas limit from consensus params
 	// if failed to query consensus params, default gasLimit is applied.
-	gasLimit, _ := rpctypes.BlockMaxGasFromConsensusParams(rpctypes.ContextWithHeight(cmtHeader.Height), s.backend.ClientCtx, cmtHeader.Height)
+	gasLimit, _ := rpctypes.BlockMaxGasFromConsensusParams(rpctypes.NewContextWithHeight(cmtHeader.Height), s.backend.ClientCtx, cmtHeader.Height)
 
 	// 2) Miner from provided validator
 	miner := common.BytesToAddress(validator.Bytes())
@@ -208,7 +219,7 @@ func (s *TestSuite) buildEthBlock(
 	}
 
 	// 5) Build receipts
-	receipts, err := s.backend.ReceiptsFromCometBlock(resBlock, blockRes, msgs, nil)
+	receipts, err := s.backend.ReceiptsFromCometBlock(s.Ctx(), resBlock, blockRes, msgs, nil)
 	s.Require().NoError(err)
 
 	// 6) Gas used
@@ -222,6 +233,7 @@ func (s *TestSuite) buildEthBlock(
 			s.T().Errorf("negative gas used value: %d", gas)
 			continue
 		}
+		// #nosec G115 -- gas checked >= 0 above
 		gasUsed += uint64(gas)
 	}
 	ethHeader.GasUsed = gasUsed

@@ -57,7 +57,7 @@ contract ContractCreationTester {
         uint256 delegateAmount2
     ) external payable {
         // 1. Precompile call (delegate) - convert from wei to base denom
-        uint256 delegateAmount1BaseDenom = delegateAmount1 / 1e12;
+        uint256 delegateAmount1BaseDenom = delegateAmount1;
         STAKING_CONTRACT.delegate(
             address(this),
             validatorAddr,
@@ -72,7 +72,7 @@ contract ContractCreationTester {
         emit OperationCompleted("create", true);
 
         // 3. Precompile call (delegate again) - convert from wei to base denom
-        uint256 delegateAmount2BaseDenom = delegateAmount2 / 1e12;
+        uint256 delegateAmount2BaseDenom = delegateAmount2;
         STAKING_CONTRACT.delegate(
             address(this),
             validatorAddr,
@@ -89,7 +89,7 @@ contract ContractCreationTester {
         uint256 delegateAmount2
     ) external payable {
         // 1. Precompile call (delegate) - convert from wei to base denom
-        uint256 delegateAmount1BaseDenom = delegateAmount1 / 1e12;
+        uint256 delegateAmount1BaseDenom = delegateAmount1;
         STAKING_CONTRACT.delegate(
             address(this),
             validatorAddr,
@@ -107,7 +107,7 @@ contract ContractCreationTester {
         }
 
         // 3. Precompile call (delegate again) - convert from wei to base denom
-        uint256 delegateAmount2BaseDenom = delegateAmount2 / 1e12;
+        uint256 delegateAmount2BaseDenom = delegateAmount2;
         STAKING_CONTRACT.delegate(
             address(this),
             validatorAddr,
@@ -135,7 +135,7 @@ contract ContractCreationTester {
         }
 
         // 2. Precompile call - convert from wei to base denom
-        uint256 delegateAmountBaseDenom = delegateAmount / 1e12;
+        uint256 delegateAmountBaseDenom = delegateAmount;
         STAKING_CONTRACT.delegate(
             address(this),
             validatorAddr,
@@ -168,7 +168,7 @@ contract ContractCreationTester {
         emit OperationCompleted("create", true);
 
         // 2. Precompile call (delegate) - convert from wei to base denom, reverted and caught
-        uint256 delegateAmountBaseDenom = delegateAmount / 1e12;
+        uint256 delegateAmountBaseDenom = delegateAmount;
         try STAKING_CONTRACT.delegate(
             address(this),
             validatorAddr,
@@ -195,9 +195,8 @@ contract ContractCreationTester {
         uint256 successCreationValue
     ) external payable {
         // 1. Try to create contract (will revert after creation, catch it)
-        try this.createAndRevert{value: revertCreationValue}(revertCreationValue) returns (
-            SimpleReceiver newContract1
-        ) {
+        try this.createAndRevert{value: revertCreationValue}
+        (revertCreationValue) returns (SimpleReceiver newContract1) {
             // This won't execute because createAndRevert reverts
             createdContracts.push(address(newContract1));
             emit ContractCreated(address(newContract1), revertCreationValue);
@@ -207,7 +206,7 @@ contract ContractCreationTester {
         }
 
         // 2. Precompile call - convert from wei to base denom
-        uint256 delegateAmountBaseDenom = delegateAmount / 1e12;
+        uint256 delegateAmountBaseDenom = delegateAmount;
         STAKING_CONTRACT.delegate(
             address(this),
             validatorAddr,

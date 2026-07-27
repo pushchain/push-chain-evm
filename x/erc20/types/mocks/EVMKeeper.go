@@ -17,7 +17,7 @@ import (
 
 	statedb "github.com/cosmos/evm/x/vm/statedb"
 
-	storetypes "cosmossdk.io/store/types"
+	storetypes "github.com/cosmos/cosmos-sdk/store/v2/types"
 
 	tracing "github.com/ethereum/go-ethereum/core/tracing"
 
@@ -342,19 +342,19 @@ func (_m *EVMKeeper) IsContract(ctx types.Context, address common.Address) bool 
 }
 
 // KVStoreKeys provides a mock function with no fields
-func (_m *EVMKeeper) KVStoreKeys() map[string]*storetypes.KVStoreKey {
+func (_m *EVMKeeper) KVStoreKeys() map[string]storetypes.StoreKey {
 	ret := _m.Called()
 
 	if len(ret) == 0 {
 		panic("no return value specified for KVStoreKeys")
 	}
 
-	var r0 map[string]*storetypes.KVStoreKey
-	if rf, ok := ret.Get(0).(func() map[string]*storetypes.KVStoreKey); ok {
+	var r0 map[string]storetypes.StoreKey
+	if rf, ok := ret.Get(0).(func() map[string]storetypes.StoreKey); ok {
 		r0 = rf()
 	} else {
 		if ret.Get(0) != nil {
-			r0 = ret.Get(0).(map[string]*storetypes.KVStoreKey)
+			r0 = ret.Get(0).(map[string]storetypes.StoreKey)
 		}
 	}
 
@@ -394,7 +394,8 @@ func (_m *EVMKeeper) SetState(ctx types.Context, addr common.Address, key common
 func NewEVMKeeper(t interface {
 	mock.TestingT
 	Cleanup(func())
-}) *EVMKeeper {
+},
+) *EVMKeeper {
 	mock := &EVMKeeper{}
 	mock.Mock.Test(t)
 
