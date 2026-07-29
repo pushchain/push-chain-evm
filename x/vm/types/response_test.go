@@ -1,6 +1,7 @@
 package types_test
 
 import (
+	"encoding/json"
 	"strconv"
 	"testing"
 
@@ -379,4 +380,142 @@ func TestPatchTxResponses_ZeroLogEthTx(t *testing.T) {
 	require.Len(t, resp2.Logs, 1)
 	require.Equal(t, uint64(2), resp2.Logs[0].Index, "zero-log tx must not advance log.Index")
 	require.Equal(t, uint64(2), resp2.Logs[0].TxIndex, "zero-log tx must still take an eth-tx rank")
+}
+
+// derivedTxEvents builds the (ethereum_tx, tx_log) event pair that
+// DerivedEVMCallWithData emits for one derived tx. Logs are serialized at emit
+// time with tx-local indices, which is what PatchTxResponses must correct:
+// statedb.AddLog restarts log.Index at 0 for every derived call and sets
+// log.TxIndex to the cosmos position.
+func derivedTxEvents(t *testing.T, hash string, cosmosTxIndex uint64, numLogs int) []abci.Event {
+	t.Helper()
+	events := []abci.Event{ethTxEvent(hash, cosmosTxIndex)}
+
+	attrs := make([]abci.EventAttribute, numLogs)
+	for i := 0; i < numLogs; i++ {
+		bz, err := json.Marshal(&evmtypes.Log{
+			TxHash:  hash,
+			Index:   uint64(i),     //#nosec G115 -- tx-local index, as emitted
+			TxIndex: cosmosTxIndex, // cosmos position, as emitted
+		})
+		require.NoError(t, err)
+		attrs[i] = abci.EventAttribute{Key: evmtypes.AttributeKeyTxLog, Value: string(bz)}
+	}
+	events = append(events, abci.Event{Type: evmtypes.EventTypeTxLog, Attributes: attrs})
+	return events
+}
+
+// derivedLogs pulls the patched logs back out of a result's tx_log events.
+func derivedLogs(t *testing.T, res *abci.ExecTxResult) []evmtypes.Log {
+	t.Helper()
+	var out []evmtypes.Log
+	for _, ev := range res.Events {
+		if ev.Type != evmtypes.EventTypeTxLog {
+			continue
+		}
+		for _, attr := range ev.Attributes {
+			if attr.Key != evmtypes.AttributeKeyTxLog {
+				continue
+			}
+			var log evmtypes.Log
+			require.NoError(t, json.Unmarshal([]byte(attr.Value), &log))
+			out = append(out, log)
+		}
+	}
+	return out
+}
+
+// derivedTxResult builds a successful cosmos tx result that carries derived txs
+// only: its Data has no MsgEthereumTxResponse, exactly like a uexecutor tx.
+func derivedTxResult(t *testing.T, events []abci.Event) *abci.ExecTxResult {
+	t.Helper()
+	data, err := proto.Marshal(&sdk.TxMsgData{MsgResponses: []*codectypes.Any{}})
+	require.NoError(t, err)
+	return &abci.ExecTxResult{Code: 0, Data: data, Events: events}
+}
+
+// TestPatchTxResponses_DerivedTxLogIndex asserts that logs carried in tx_log
+// events (push-chain derived txs) receive block-global log.Index values, and
+// their log.TxIndex is the eth rank rather than the cosmos position.
+//
+// Before this was handled, every derived tx restarted log.Index at 0, producing
+// duplicate logIndex values within a block.
+func TestPatchTxResponses_DerivedTxLogIndex(t *testing.T) {
+	// cosmos tx 0: derived tx with 2 logs; cosmos tx 1: derived tx with 1 log.
+	res0 := derivedTxResult(t, derivedTxEvents(t, "0xaa", 0, 2))
+	res1 := derivedTxResult(t, derivedTxEvents(t, "0xbb", 1, 1))
+
+	result, err := evmtypes.PatchTxResponses([]*abci.ExecTxResult{res0, res1})
+	require.NoError(t, err)
+
+	logs0 := derivedLogs(t, result[0])
+	require.Len(t, logs0, 2)
+	require.Equal(t, uint64(0), logs0[0].Index)
+	require.Equal(t, uint64(1), logs0[1].Index)
+
+	logs1 := derivedLogs(t, result[1])
+	require.Len(t, logs1, 1)
+	require.Equal(t, uint64(2), logs1[0].Index,
+		"second derived tx must continue the block log sequence, not restart at 0")
+
+	// eth ranks, not cosmos positions
+	require.Equal(t, uint64(0), logs0[0].TxIndex)
+	require.Equal(t, uint64(1), logs1[0].TxIndex)
+	require.Equal(t, "0", eventTxIndex(t, result[0]))
+	require.Equal(t, "1", eventTxIndex(t, result[1]))
+}
+
+// TestPatchTxResponses_DerivedTxAdvancesEthRank asserts that a successful
+// derived-only cosmos tx consumes eth-tx ranks. It contributes no
+// MsgEthereumTxResponse, so without explicit advancement the counter would stay
+// put and the following tx would reuse the same rank.
+func TestPatchTxResponses_DerivedTxAdvancesEthRank(t *testing.T) {
+	// cosmos tx 0: one derived tx. cosmos tx 1: a native eth tx.
+	derived := derivedTxResult(t, derivedTxEvents(t, "0xaa", 0, 1))
+	native := createEthTxResult(t, "hash1", 1, 0)
+	native.Events = []abci.Event{ethTxEvent("0xbb", 1)}
+
+	result, err := evmtypes.PatchTxResponses([]*abci.ExecTxResult{derived, native})
+	require.NoError(t, err)
+
+	require.Equal(t, "0", eventTxIndex(t, result[0]), "derived tx takes eth rank 0")
+	require.Equal(t, "1", eventTxIndex(t, result[1]),
+		"native tx must take rank 1 — the derived tx consumed rank 0")
+
+	resp := unmarshalTxResponse(t, result[1])
+	require.Equal(t, uint64(1), resp.Logs[0].TxIndex,
+		"native log.TxIndex must match its receipt's eth rank")
+	require.Equal(t, uint64(1), resp.Logs[0].Index,
+		"native log must continue the block log sequence after the derived tx's log")
+}
+
+// TestPatchTxResponses_MultipleDerivedTxsInOneCosmosTx asserts that several
+// derived txs emitted by a single cosmos message each get their own eth rank
+// and contiguous log indices.
+func TestPatchTxResponses_MultipleDerivedTxsInOneCosmosTx(t *testing.T) {
+	events := append(
+		derivedTxEvents(t, "0xaa", 0, 1),
+		derivedTxEvents(t, "0xbb", 0, 2)...,
+	)
+	res := derivedTxResult(t, events)
+	next := createEthTxResult(t, "hash1", 1, 0)
+	next.Events = []abci.Event{ethTxEvent("0xcc", 1)}
+
+	result, err := evmtypes.PatchTxResponses([]*abci.ExecTxResult{res, next})
+	require.NoError(t, err)
+
+	logs := derivedLogs(t, result[0])
+	require.Len(t, logs, 3)
+	require.Equal(t, uint64(0), logs[0].Index)
+	require.Equal(t, uint64(1), logs[1].Index)
+	require.Equal(t, uint64(2), logs[2].Index)
+
+	// first derived tx is rank 0, second is rank 1
+	require.Equal(t, uint64(0), logs[0].TxIndex)
+	require.Equal(t, uint64(1), logs[1].TxIndex)
+	require.Equal(t, uint64(1), logs[2].TxIndex)
+
+	// the following native tx must start at rank 2
+	require.Equal(t, "2", eventTxIndex(t, result[1]))
+	require.Equal(t, uint64(3), unmarshalTxResponse(t, result[1]).Logs[0].Index)
 }
