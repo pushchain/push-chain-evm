@@ -349,7 +349,43 @@ func GetLogsFromBlockResults(blockRes *cmtrpctypes.ResultBlockResults) ([][]*eth
 		}
 		blockLogs = append(blockLogs, logs)
 	}
+
+	// Assign block-global log indices. See ReindexBlockLogs for why this is
+	// required for derived txs.
+	ReindexBlockLogs(blockLogs)
+
 	return blockLogs, nil
+}
+
+// ReindexBlockLogs assigns block-global, sequential `Index` values to every log
+// in the block, walking transactions in block order and logs in emission order.
+// That is the Ethereum definition of `logIndex`: the position of the log within
+// the *block*, not within its transaction.
+//
+// Why this is needed: cosmos/evm v0.7.0 removed the block-level log counter that
+// used to live in the transient store (statedb.AddLog went from
+// `log.Index = txConfig.LogIndex + len(s.logs)` to `log.Index = len(s.logs)`),
+// and now assigns block-global indices post-hoc in types.PatchTxResponses. That
+// pass only rewrites logs carried in a MsgEthereumTxResponse, so it covers
+// native MsgEthereumTx but NOT push-chain's derived txs, whose logs are
+// serialized into `tx_log` ABCI events from inside a Cosmos message. Without
+// this pass a block containing derived txs hands out duplicate logIndex values
+// (each derived tx restarting at 0), which breaks indexers keyed on
+// (blockHash, logIndex).
+//
+// In blocks with no derived txs this is a no-op in effect: the sequence it
+// produces is identical to the one PatchTxResponses already assigned.
+func ReindexBlockLogs(blockLogs [][]*ethtypes.Log) {
+	var index uint
+	for _, logs := range blockLogs {
+		for _, log := range logs {
+			if log == nil {
+				continue
+			}
+			log.Index = index
+			index++
+		}
+	}
 }
 
 // GetHexProofs returns list of hex data of proof op

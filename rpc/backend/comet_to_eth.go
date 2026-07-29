@@ -548,8 +548,31 @@ func (b *Backend) ReceiptsFromCometBlock(
 			TransactionIndex: uint(txResult.EthTxIndex), // #nosec G115 -- checked for int overflow already
 		}
 
+		// A derived tx's logs are serialized into `tx_log` ABCI events while the
+		// enclosing Cosmos message executes, so they carry the *Cosmos* tx index
+		// rather than the eth one that the receipt reports (the receipt's index is
+		// rewritten block-globally by types.rewriteEthTxEventIndex). Align the logs
+		// with their own receipt so a receipt never disagrees with its logs.
+		for _, log := range logs {
+			if log != nil {
+				log.TxIndex = uint(txResult.EthTxIndex) // #nosec G115 -- checked for int overflow already
+			}
+		}
+
 		receipts[i] = receipt
 	}
+
+	// Assign block-global log indices across every receipt, in block order.
+	// Required because PatchTxResponses only renumbers logs carried in a
+	// MsgEthereumTxResponse, which excludes derived txs. See ReindexBlockLogs.
+	blockLogs := make([][]*ethtypes.Log, 0, len(receipts))
+	for _, receipt := range receipts {
+		if receipt == nil {
+			continue
+		}
+		blockLogs = append(blockLogs, receipt.Logs)
+	}
+	ReindexBlockLogs(blockLogs)
 
 	return receipts, nil
 }

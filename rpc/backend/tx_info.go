@@ -295,6 +295,32 @@ func (b *Backend) GetTransactionLogs(ctx context.Context, hash common.Hash) (res
 		return nil, err
 	}
 
+	// Prefer the block-wide view: GetLogsFromBlockResults assigns block-global
+	// logIndex values (see ReindexBlockLogs), so a single-tx lookup reports the
+	// same indices as eth_getLogs. Select this tx's logs by hash, which works for
+	// both native and derived txs since every log carries its eth TxHash.
+	targetHash := hash
+	if additional != nil {
+		targetHash = additional.Hash
+	}
+	if blockLogs, blockErr := GetLogsFromBlockResults(resBlockResult); blockErr == nil {
+		var matched []*ethtypes.Log
+		for _, txLogs := range blockLogs {
+			for _, log := range txLogs {
+				if log != nil && log.TxHash == targetHash {
+					matched = append(matched, log)
+				}
+			}
+		}
+		if len(matched) > 0 {
+			return matched, nil
+		}
+	}
+
+	// Fallback: extract this tx's logs directly. Reached when the block-wide pass
+	// finds nothing for this hash (e.g. a Cosmos tx mixing a native MsgEthereumTx
+	// with derived txs, where the block-wide event fallback does not kick in).
+	// Indices are then tx-local; correctness of the common paths is preserved above.
 	if additional != nil {
 		// Derived tx: no MsgEthereumTxResponse in the Cosmos tx Data field.
 		// Parse logs from tx_log ABCI events by matching TxHash instead.
