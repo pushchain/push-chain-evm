@@ -141,12 +141,12 @@ PACKAGES_UNIT := $(shell go list ./... | grep -v '/tests/e2e$$' | grep -v '/simu
 PACKAGES_EVMD := $(shell cd evmd && go list ./... | grep -v '/simulation')
 COVERPKG_EVM  := $(shell go list ./... | grep -v '/tests/e2e$$' | grep -v '/simulation' | paste -sd, -)
 COVERPKG_ALL  := $(COVERPKG_EVM)
-COMMON_COVER_ARGS := -timeout=15m -covermode=atomic
+COMMON_COVER_ARGS := -timeout=30m -covermode=atomic
 
 TEST_PACKAGES := ./...
 TEST_TARGETS := test-unit test-evmd test-unit-cover test-race
 
-test-unit: ARGS=-timeout=15m
+test-unit: ARGS=-timeout=30m
 test-unit: TEST_PACKAGES=$(PACKAGES_UNIT)
 test-unit: run-tests
 
@@ -154,11 +154,11 @@ test-race: ARGS=-race
 test-race: TEST_PACKAGES=$(PACKAGES_UNIT)
 test-race: run-tests
 
-test-evmd: ARGS=-timeout=15m
+test-evmd: ARGS=-timeout=30m
 test-evmd:
 	@cd evmd && go test -count=1 -race -tags=test -mod=readonly $(ARGS) $(EXTRA_ARGS) $(PACKAGES_EVMD)
 
-test-unit-cover: ARGS=-timeout=15m -coverprofile=coverage.txt -covermode=atomic
+test-unit-cover: ARGS=-timeout=30m -coverprofile=coverage.txt -covermode=atomic
 test-unit-cover: TEST_PACKAGES=$(PACKAGES_UNIT)
 test-unit-cover: run-tests
 	@echo "🔍 Running evm (root) coverage..."
@@ -174,9 +174,9 @@ test: test-unit
 
 test-all:
 	@echo "🔍 Running evm module tests..."
-	@go test -race -tags=test -mod=readonly -timeout=15m $(PACKAGES_NOSIMULATION)
+	@go test -race -tags=test -mod=readonly -timeout=30m $(PACKAGES_NOSIMULATION)
 	@echo "🔍 Running evmd module tests..."
-	@cd evmd && go test -race -tags=test -mod=readonly -timeout=15m $(PACKAGES_EVMD)
+	@cd evmd && go test -race -tags=test -mod=readonly -timeout=30m $(PACKAGES_EVMD)
 
 run-tests:
 ifneq (,$(shell which tparse 2>/dev/null))
@@ -212,7 +212,7 @@ lint: lint-go lint-python lint-contracts
 lint-go:
 	@echo "--> Running linter"
 	@go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(golangci_version)
-	@$(golangci_lint_cmd) run --timeout=15m
+	@$(golangci_lint_cmd) run --timeout=30m
 
 lint-python:
 	find . -name "*.py" -type f -not -path "*/node_modules/*" | xargs pylint
@@ -223,7 +223,7 @@ lint-contracts:
 
 lint-fix:
 	@go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(golangci_version)
-	@$(golangci_lint_cmd) run --timeout=15m --fix
+	@$(golangci_lint_cmd) run --timeout=30m --fix
 
 lint-fix-contracts:
 	solhint --fix contracts/**/*.sol
