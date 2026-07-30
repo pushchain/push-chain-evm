@@ -8,10 +8,10 @@ import (
 
 	errorsmod "cosmossdk.io/errors"
 	"cosmossdk.io/math"
-	txsigning "cosmossdk.io/x/tx/signing"
 
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	errortypes "github.com/cosmos/cosmos-sdk/types/errors"
+	txsigning "github.com/cosmos/cosmos-sdk/x/tx/signing"
 )
 
 var (
@@ -79,12 +79,22 @@ func (msg MsgConvertERC20) ValidateBasic() error {
 	return nil
 }
 
+// GetSignBytes encodes the message for signing
+func (msg MsgConvertERC20) GetSignBytes() []byte {
+	return AminoCdc.MustMarshalJSON(&msg)
+}
+
 // ValidateBasic does a sanity check of the provided data
 func (m *MsgUpdateParams) ValidateBasic() error {
 	if _, err := sdk.AccAddressFromBech32(m.Authority); err != nil {
 		return errorsmod.Wrap(err, "Invalid authority address")
 	}
 	return nil
+}
+
+// GetSignBytes implements the LegacyMsg interface.
+func (m MsgUpdateParams) GetSignBytes() []byte {
+	return AminoCdc.MustMarshalJSON(&m)
 }
 
 // ValidateBasic does a sanity check of the provided data
@@ -133,4 +143,9 @@ func (msg MsgConvertCoin) ValidateBasic() error {
 		return errorsmod.Wrapf(errortypes.ErrInvalidAddress, "invalid receiver hex address %s", msg.Receiver)
 	}
 	return nil
+}
+
+// GetSignBytes encodes the message for signing
+func (msg MsgConvertCoin) GetSignBytes() []byte {
+	return AminoCdc.MustMarshalJSON(&msg)
 }

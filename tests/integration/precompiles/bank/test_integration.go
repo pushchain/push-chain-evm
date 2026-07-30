@@ -1,6 +1,7 @@
 package bank
 
 import (
+	"fmt"
 	"math/big"
 	"testing"
 
@@ -26,6 +27,7 @@ import (
 
 	"cosmossdk.io/math"
 
+	storetypes "github.com/cosmos/cosmos-sdk/store/v2/types"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	minttypes "github.com/cosmos/cosmos-sdk/x/mint/types"
 )
@@ -119,8 +121,8 @@ func TestIntegrationSuite(t *testing.T, create network.CreateEvmApp, options ...
 			contractData ContractData
 			passCheck    testutil.LogCheckArgs
 
-			cosmosEVMTotalSupply, _ = new(big.Int).SetString("200003000000000000000000", 10)
-			xmplTotalSupply, _      = new(big.Int).SetString("200000000000000000000000", 10)
+			cosmosEVMTotalSupply *big.Int
+			xmplTotalSupply      *big.Int
 		)
 
 		BeforeEach(func() {
@@ -155,6 +157,13 @@ func TestIntegrationSuite(t *testing.T, create network.CreateEvmApp, options ...
 
 			err = is.network.NextBlock()
 			Expect(err).ToNot(HaveOccurred(), "failed to advance block")
+
+			// Get total supply from bank keeper
+			cosmosSupply := is.network.App.GetBankKeeper().GetSupply(is.network.GetContext(), is.bondDenom)
+			cosmosEVMTotalSupply = new(big.Int).Set(cosmosSupply.Amount.BigInt())
+
+			xmplSupply := is.network.App.GetBankKeeper().GetSupply(is.network.GetContext(), is.tokenDenom)
+			xmplTotalSupply = new(big.Int).Set(xmplSupply.Amount.BigInt())
 		})
 
 		Context("Direct precompile queries", func() {
@@ -247,6 +256,67 @@ func TestIntegrationSuite(t *testing.T, create network.CreateEvmApp, options ...
 
 					Expect(balances[0].Amount.String()).To(Equal(cosmosEVMTotalSupply.String()))
 					Expect(balances[1].Amount.String()).To(Equal(xmplTotalSupply.String()))
+				})
+
+				It("should properly handle OOG in precompile and consume all gas", func() {
+					numDenoms := 5000
+					// Mint denoms to make TotalSupply expensive enough to OOG.
+					ctx := is.network.GetContext()
+					for i := 0; i < numDenoms; i++ {
+						denom := fmt.Sprintf("token%d", i)
+						err = is.network.App.GetBankKeeper().MintCoins(
+							ctx, minttypes.ModuleName,
+							sdk.Coins{{Denom: denom, Amount: math.NewInt(1e18)}},
+						)
+						Expect(err).ToNot(HaveOccurred(), "failed to mint coin %s", denom)
+					}
+					// Commit keeper changes directly to state.
+					store := is.network.GetContext().MultiStore()
+					cms, ok := store.(storetypes.CacheMultiStore)
+					Expect(ok).To(BeTrue())
+					cms.Write()
+
+					Expect(is.network.NextBlock()).ToNot(HaveOccurred(), "failed to advance block")
+
+					// Use callTotalSupplyWithGas to measure inner call gas consumption.
+					// Forward enough gas for the precompile to OOG iterating 5000+ denoms.
+					gasForward := big.NewInt(9_000_000)
+
+					txArgs := evmtypes.EvmTxArgs{
+						To:       &bankCallerContractAddr,
+						GasLimit: 20_000_000,
+					}
+					callArgs := testutiltypes.CallArgs{
+						ContractABI: bankCallerContract.ABI,
+						MethodName:  "callTotalSupplyWithGas",
+						Args:        []interface{}{gasForward},
+					}
+
+					res, execErr := is.factory.ExecuteContractCall(sender.Priv, txArgs, callArgs)
+					Expect(execErr).ToNot(HaveOccurred(), "failed to execute callTotalSupplyWithGas")
+
+					ethRes, decErr := evmtypes.DecodeTxResponse(res.Data)
+					Expect(decErr).ToNot(HaveOccurred(), "failed to decode eth tx response")
+					Expect(ethRes.VmError).To(BeEmpty(), "outer call should not revert")
+
+					// Unpack: (bool success, uint256 innerGasUsed)
+					out, unpackErr := bankCallerContract.ABI.Unpack("callTotalSupplyWithGas", ethRes.Ret)
+					Expect(unpackErr).ToNot(HaveOccurred(), "failed to unpack result")
+
+					innerSuccess := out[0].(bool)
+					innerGasUsed := out[1].(*big.Int)
+
+					fmt.Printf("\nInner call: success=%v, innerGasUsed=%s, gasForwarded=%s, txGasUsed=%d\n",
+						innerSuccess, innerGasUsed.String(), gasForward.String(), ethRes.GasUsed)
+
+					// The inner call should have failed (OOG with 5000 denoms).
+					Expect(innerSuccess).To(BeFalse(), "inner call should OOG with insufficient gas for 5000 denoms")
+
+					// The inner call should have consumed all (or nearly all) forwarded gas.
+					// With correct gas accounting, innerGasUsed ≈ gasForward.
+					// With the bug, innerGasUsed would be ~3k (only EVM overhead, no precompile charge).
+					Expect(innerGasUsed.Uint64()).To(BeNumerically(">=", gasForward.Uint64()*90/100),
+						"inner OOG call should consume all forwarded gas, got %s out of %s", innerGasUsed.String(), gasForward.String())
 				})
 			})
 

@@ -6,14 +6,12 @@ import (
 
 	abcitypes "github.com/cometbft/cometbft/abci/types"
 
-	precisebanktypes "github.com/cosmos/evm/x/precisebank/types"
-	ibctesting "github.com/cosmos/ibc-go/v10/testing"
+	ibctesting "github.com/cosmos/ibc-go/v11/testing"
 
 	sdktypes "github.com/cosmos/cosmos-sdk/types"
 	sdktestutil "github.com/cosmos/cosmos-sdk/types/module/testutil"
 	txtypes "github.com/cosmos/cosmos-sdk/types/tx"
 	authtypes "github.com/cosmos/cosmos-sdk/x/auth/types"
-	"github.com/cosmos/cosmos-sdk/x/authz"
 	banktypes "github.com/cosmos/cosmos-sdk/x/bank/types"
 	distrtypes "github.com/cosmos/cosmos-sdk/x/distribution/types"
 	stakingtypes "github.com/cosmos/cosmos-sdk/x/staking/types"
@@ -36,9 +34,7 @@ type Network interface {
 
 	// Clients
 	GetAuthClient() authtypes.QueryClient
-	GetAuthzClient() authz.QueryClient
 	GetBankClient() banktypes.QueryClient
-	GetPreciseBankClient() precisebanktypes.QueryClient
 	GetStakingClient() stakingtypes.QueryClient
 	GetDistrClient() distrtypes.QueryClient
 

@@ -11,22 +11,27 @@ import (
 	"github.com/ethereum/go-ethereum/core/vm"
 	ethparams "github.com/ethereum/go-ethereum/params"
 	"github.com/holiman/uint256"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
-	evmmempool "github.com/cosmos/evm/mempool"
+	evmtrace "github.com/cosmos/evm/trace"
 	"github.com/cosmos/evm/utils"
 	"github.com/cosmos/evm/x/vm/statedb"
 	"github.com/cosmos/evm/x/vm/types"
 	"github.com/cosmos/evm/x/vm/wrappers"
 
 	errorsmod "cosmossdk.io/errors"
-	"cosmossdk.io/log"
+	"cosmossdk.io/log/v2"
 	"cosmossdk.io/math"
-	"cosmossdk.io/store/prefix"
-	storetypes "cosmossdk.io/store/types"
 
 	"github.com/cosmos/cosmos-sdk/codec"
+	"github.com/cosmos/cosmos-sdk/store/v2/prefix"
+	storetypes "github.com/cosmos/cosmos-sdk/store/v2/types"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 )
+
+var tracer = otel.Tracer("evm/x/vm/keeper")
 
 // Keeper grants access to the EVM module state and implements the go-ethereum StateDB interface.
 type Keeper struct {
@@ -39,11 +44,11 @@ type Keeper struct {
 	// - storing Bloom filters by block height. Needed for the Web3 API.
 	storeKey storetypes.StoreKey
 
-	// key to access the transient store, which is reset on every block during Commit
-	transientKey storetypes.StoreKey
+	// key to access the object store, which is reset on every block during Commit
+	objectKey storetypes.StoreKey
 
-	// KVStore Keys for modules wired to app
-	storeKeys map[string]*storetypes.KVStoreKey
+	// Store Keys for modules wired to app
+	storeKeys map[string]storetypes.StoreKey
 
 	// the address capable of executing a MsgUpdateParams message. Typically, this should be the x/gov module account.
 	authority sdk.AccAddress
@@ -78,20 +83,16 @@ type Keeper struct {
 	// parameters.
 	precompiles map[common.Address]vm.PrecompiledContract
 
-	// evmMempool is the custom EVM appside mempool
-	// if it is nil, the default comet mempool will be used
-	evmMempool *evmmempool.ExperimentalEVMMempool
-
-	// defaultEvmCoinInfo is the default EVM coin info used when evmCoinInfo is not initialized in the state,
-	// mainly for historical queries.
-	defaultEvmCoinInfo types.EvmCoinInfo
+	// virtualFeeCollection enabling will use "Virtual" methods from the bank module to accumulate
+	// fees to the fee collector module in the endBlocker instead of using regular sends during tx execution.
+	virtualFeeCollection bool
 }
 
 // NewKeeper generates new evm module keeper
 func NewKeeper(
 	cdc codec.BinaryCodec,
-	storeKey, transientKey storetypes.StoreKey,
-	keys map[string]*storetypes.KVStoreKey,
+	storeKey, objectKey storetypes.StoreKey,
+	keys []storetypes.StoreKey,
 	authority sdk.AccAddress,
 	ak types.AccountKeeper,
 	bankKeeper types.BankKeeper,
@@ -114,6 +115,10 @@ func NewKeeper(
 
 	bankWrapper := wrappers.NewBankWrapper(bankKeeper)
 	feeMarketWrapper := wrappers.NewFeeMarketWrapper(fmk)
+	storeKeys := make(map[string]storetypes.StoreKey)
+	for _, k := range keys {
+		storeKeys[k.Name()] = k
+	}
 
 	// set global chain config
 	ethCfg := types.DefaultChainConfig(evmChainID)
@@ -130,24 +135,24 @@ func NewKeeper(
 		stakingKeeper:    sk,
 		feeMarketWrapper: feeMarketWrapper,
 		storeKey:         storeKey,
-		transientKey:     transientKey,
+		objectKey:        objectKey,
 		tracer:           tracer,
 		consensusKeeper:  consensusKeeper,
 		erc20Keeper:      erc20Keeper,
-		storeKeys:        keys,
+		storeKeys:        storeKeys,
 	}
+}
+
+// EnableVirtualFeeCollection switches fee deduction for evm transactions to use the virtual fee collection of the
+// bank keeper via the object store.
+// Note: Do NOT use this if your chain does not have an 18 decimal point precision gas token.
+func (k *Keeper) EnableVirtualFeeCollection() {
+	k.virtualFeeCollection = true
 }
 
 // Logger returns a module-specific logger.
 func (k Keeper) Logger(ctx sdk.Context) log.Logger {
 	return ctx.Logger().With("module", types.ModuleName)
-}
-
-// WithDefaultEvmCoinInfo set default EvmCoinInfo
-func (k *Keeper) WithDefaultEvmCoinInfo(coinInfo types.EvmCoinInfo) *Keeper {
-	k.defaultEvmCoinInfo = coinInfo
-	types.SetDefaultEvmCoinInfo(coinInfo)
-	return k
 }
 
 // ----------------------------------------------------------------------------
@@ -156,11 +161,11 @@ func (k *Keeper) WithDefaultEvmCoinInfo(coinInfo types.EvmCoinInfo) *Keeper {
 // ----------------------------------------------------------------------------
 
 // EmitBlockBloomEvent emit block bloom events
-func (k Keeper) EmitBlockBloomEvent(ctx sdk.Context, bloom ethtypes.Bloom) {
+func (k Keeper) EmitBlockBloomEvent(ctx sdk.Context, bloom []byte) {
 	ctx.EventManager().EmitEvent(
 		sdk.NewEvent(
 			types.EventTypeBlockBloom,
-			sdk.NewAttribute(types.AttributeKeyEthereumBloom, string(bloom.Bytes())),
+			sdk.NewAttribute(types.AttributeKeyEthereumBloom, string(bloom)),
 		),
 	)
 }
@@ -170,40 +175,74 @@ func (k Keeper) GetAuthority() sdk.AccAddress {
 	return k.authority
 }
 
-// GetBlockBloomTransient returns bloom bytes for the current block height
-func (k Keeper) GetBlockBloomTransient(ctx sdk.Context) *big.Int {
-	store := prefix.NewStore(ctx.TransientStore(k.transientKey), types.KeyPrefixTransientBloom)
-	heightBz := sdk.Uint64ToBigEndian(uint64(ctx.BlockHeight())) //nolint:gosec // G115 // won't exceed uint64
-	bz := store.Get(heightBz)
-	if len(bz) == 0 {
-		return big.NewInt(0)
+// CollectTxBloom collects all tx blooms and emit a single block bloom event
+func (k Keeper) CollectTxBloom(ctx sdk.Context) {
+	ctx, span := ctx.StartSpan(tracer, "CollectTxBloom", trace.WithAttributes(
+		attribute.Int64("block_height", ctx.BlockHeight()),
+	))
+	defer span.End()
+	store := prefix.NewObjStore(ctx.ObjectStore(k.objectKey), types.KeyPrefixObjectBloom)
+	it := store.Iterator(nil, nil)
+	defer it.Close()
+
+	bloom := new(big.Int)
+	for ; it.Valid(); it.Next() {
+		bloom.Or(bloom, it.Value().(*big.Int))
+		store.Delete(it.Key())
 	}
 
-	return new(big.Int).SetBytes(bz)
+	k.EmitBlockBloomEvent(ctx, bloom.Bytes())
 }
 
-// SetBlockBloomTransient sets the given bloom bytes to the transient store. This value is reset on
+// SetTxBloom sets the given bloom bytes to the object store. This value is reset on
 // every block.
-func (k Keeper) SetBlockBloomTransient(ctx sdk.Context, bloom *big.Int) {
-	store := prefix.NewStore(ctx.TransientStore(k.transientKey), types.KeyPrefixTransientBloom)
-	heightBz := sdk.Uint64ToBigEndian(uint64(ctx.BlockHeight())) //nolint:gosec // G115 // won't exceed uint64
-	store.Set(heightBz, bloom.Bytes())
+func (k Keeper) SetTxBloom(ctx sdk.Context, bloom *big.Int) {
+	ctx, span := ctx.StartSpan(tracer, "SetTxBloom", trace.WithAttributes(
+		attribute.Int("tx_index", ctx.TxIndex()),
+		attribute.Int("msg_index", ctx.MsgIndex()),
+	))
+	defer span.End()
+	store := ctx.ObjectStore(k.objectKey)
+	store.Set(types.ObjectBloomKey(ctx.TxIndex(), ctx.MsgIndex()), bloom)
 }
 
-// ----------------------------------------------------------------------------
-// Tx
-// ----------------------------------------------------------------------------
-
-// SetTxIndexTransient set the index of processing transaction
-func (k Keeper) SetTxIndexTransient(ctx sdk.Context, index uint64) {
-	store := ctx.TransientStore(k.transientKey)
-	store.Set(types.KeyPrefixTransientTxIndex, sdk.Uint64ToBigEndian(index))
+// GetTxBloom returns the bloom accumulated so far in the object store for the
+// current (txIndex, msgIndex), or zero if nothing has been recorded yet.
+//
+// push-chain: counterpart to AddTxBloom, used by the derived-call regression
+// tests to assert that a reverted derived execution leaves the bloom untouched
+// (F-2026-17738). Upstream has no getter because CollectTxBloom drains the
+// store at EndBlock.
+func (k Keeper) GetTxBloom(ctx sdk.Context) *big.Int {
+	store := ctx.ObjectStore(k.objectKey)
+	if v, ok := store.Get(types.ObjectBloomKey(ctx.TxIndex(), ctx.MsgIndex())).(*big.Int); ok && v != nil {
+		return new(big.Int).Set(v)
+	}
+	return new(big.Int)
 }
 
-// GetTxIndexTransient returns EVM transaction index on the current block.
-func (k Keeper) GetTxIndexTransient(ctx sdk.Context) uint64 {
-	store := ctx.TransientStore(k.transientKey)
-	return sdk.BigEndianToUint64(store.Get(types.KeyPrefixTransientTxIndex))
+// AddTxBloom ORs the given bloom into the object store entry for the current
+// (txIndex, msgIndex), instead of replacing it.
+//
+// push-chain: a single Cosmos message can emit several derived EVM txs (see
+// Keeper.DerivedEVMCallWithData), and they all share one (txIndex, msgIndex)
+// object store key. SetTxBloom would make each derived tx overwrite the
+// previous one's bloom; ORing accumulates them, which is what CollectTxBloom
+// does across keys at EndBlock anyway.
+func (k Keeper) AddTxBloom(ctx sdk.Context, bloom *big.Int) {
+	ctx, span := ctx.StartSpan(tracer, "AddTxBloom", trace.WithAttributes(
+		attribute.Int("tx_index", ctx.TxIndex()),
+		attribute.Int("msg_index", ctx.MsgIndex()),
+	))
+	defer span.End()
+	store := ctx.ObjectStore(k.objectKey)
+	key := types.ObjectBloomKey(ctx.TxIndex(), ctx.MsgIndex())
+
+	acc := new(big.Int).Set(bloom)
+	if prev, ok := store.Get(key).(*big.Int); ok && prev != nil {
+		acc.Or(acc, prev)
+	}
+	store.Set(key, acc)
 }
 
 // ----------------------------------------------------------------------------
@@ -228,7 +267,12 @@ func (k *Keeper) PostTxProcessing(
 	sender common.Address,
 	msg core.Message,
 	receipt *ethtypes.Receipt,
-) error {
+) (err error) {
+	ctx, span := ctx.StartSpan(tracer, "PostTxProcessing", trace.WithAttributes(
+		attribute.String("sender", sender.Hex()),
+		attribute.String("tx_hash", receipt.TxHash.Hex()),
+	))
+	defer func() { evmtrace.EndSpanErr(span, err) }()
 	if k.hooks == nil {
 		return nil
 	}
@@ -241,28 +285,13 @@ func (k *Keeper) HasHooks() bool {
 }
 
 // ----------------------------------------------------------------------------
-// Log
-// ----------------------------------------------------------------------------
-
-// GetLogSizeTransient returns EVM log index on the current block.
-func (k Keeper) GetLogSizeTransient(ctx sdk.Context) uint64 {
-	store := ctx.TransientStore(k.transientKey)
-	return sdk.BigEndianToUint64(store.Get(types.KeyPrefixTransientLogSize))
-}
-
-// SetLogSizeTransient fetches the current EVM log index from the transient store, increases its
-// value by one and then sets the new index back to the transient store.
-func (k Keeper) SetLogSizeTransient(ctx sdk.Context, logSize uint64) {
-	store := ctx.TransientStore(k.transientKey)
-	store.Set(types.KeyPrefixTransientLogSize, sdk.Uint64ToBigEndian(logSize))
-}
-
-// ----------------------------------------------------------------------------
 // Storage
 // ----------------------------------------------------------------------------
 
 // GetAccountStorage return state storage associated with an account
 func (k Keeper) GetAccountStorage(ctx sdk.Context, address common.Address) types.Storage {
+	ctx, span := ctx.StartSpan(tracer, "GetAccountStorage", trace.WithAttributes(attribute.String("address", address.Hex())))
+	defer span.End()
 	storage := types.Storage{}
 
 	k.ForEachStorage(ctx, address, func(key, value common.Hash) bool {
@@ -285,6 +314,8 @@ func (k Keeper) Tracer(ctx sdk.Context, msg core.Message, ethCfg *ethparams.Chai
 // GetAccountWithoutBalance load nonce and codehash without balance,
 // more efficient in cases where balance is not needed.
 func (k *Keeper) GetAccountWithoutBalance(ctx sdk.Context, addr common.Address) *statedb.Account {
+	ctx, span := ctx.StartSpan(tracer, "GetAccountWithoutBalance", trace.WithAttributes(attribute.String("address", addr.Hex())))
+	defer span.End()
 	cosmosAddr := sdk.AccAddress(addr.Bytes())
 	acct := k.accountKeeper.GetAccount(ctx, cosmosAddr)
 	if acct == nil {
@@ -301,6 +332,8 @@ func (k *Keeper) GetAccountWithoutBalance(ctx sdk.Context, addr common.Address) 
 
 // GetAccountOrEmpty returns empty account if not exist.
 func (k *Keeper) GetAccountOrEmpty(ctx sdk.Context, addr common.Address) statedb.Account {
+	ctx, span := ctx.StartSpan(tracer, "GetAccountOrEmpty", trace.WithAttributes(attribute.String("address", addr.Hex())))
+	defer span.End()
 	acct := k.GetAccount(ctx, addr)
 	if acct != nil {
 		return *acct
@@ -315,6 +348,8 @@ func (k *Keeper) GetAccountOrEmpty(ctx sdk.Context, addr common.Address) statedb
 
 // GetNonce returns the sequence number of an account, returns 0 if not exists.
 func (k *Keeper) GetNonce(ctx sdk.Context, addr common.Address) uint64 {
+	ctx, span := ctx.StartSpan(tracer, "GetNonce", trace.WithAttributes(attribute.String("address", addr.Hex())))
+	defer span.End()
 	cosmosAddr := sdk.AccAddress(addr.Bytes())
 	acct := k.accountKeeper.GetAccount(ctx, cosmosAddr)
 	if acct == nil {
@@ -326,6 +361,8 @@ func (k *Keeper) GetNonce(ctx sdk.Context, addr common.Address) uint64 {
 
 // SpendableCoin load account's balance of gas token.
 func (k *Keeper) SpendableCoin(ctx sdk.Context, addr common.Address) *uint256.Int {
+	ctx, span := ctx.StartSpan(tracer, "SpendableCoin", trace.WithAttributes(attribute.String("address", addr.Hex())))
+	defer span.End()
 	cosmosAddr := sdk.AccAddress(addr.Bytes())
 
 	// Get the balance via bank wrapper to convert it to 18 decimals if needed.
@@ -341,6 +378,8 @@ func (k *Keeper) SpendableCoin(ctx sdk.Context, addr common.Address) *uint256.In
 
 // GetBalance load account's balance of gas token.
 func (k *Keeper) GetBalance(ctx sdk.Context, addr common.Address) *uint256.Int {
+	ctx, span := ctx.StartSpan(tracer, "GetBalance", trace.WithAttributes(attribute.String("address", addr.Hex())))
+	defer span.End()
 	cosmosAddr := sdk.AccAddress(addr.Bytes())
 
 	// Get the balance via bank wrapper to convert it to 18 decimals if needed.
@@ -359,6 +398,8 @@ func (k *Keeper) GetBalance(ctx sdk.Context, addr common.Address) *uint256.Int {
 // - `0`: london hardfork enabled but feemarket is not enabled.
 // - `n`: both london hardfork and feemarket are enabled.
 func (k Keeper) GetBaseFee(ctx sdk.Context) *big.Int {
+	ctx, span := ctx.StartSpan(tracer, "GetBaseFee", trace.WithAttributes(attribute.Int64("block_height", ctx.BlockHeight())))
+	defer span.End()
 	ethCfg := types.GetEthChainConfig()
 	if !types.IsLondon(ethCfg, ctx.BlockHeight()) {
 		return nil
@@ -378,23 +419,20 @@ func (k Keeper) GetMinGasPrice(ctx sdk.Context) math.LegacyDec {
 	return k.feeMarketWrapper.GetParams(ctx).MinGasPrice
 }
 
-// ResetTransientGasUsed reset gas used to prepare for execution of current cosmos tx, called in ante handler.
-func (k Keeper) ResetTransientGasUsed(ctx sdk.Context) {
-	store := ctx.TransientStore(k.transientKey)
-	store.Delete(types.KeyPrefixTransientGasUsed)
-}
-
 // GetTransientGasUsed returns the gas used by current cosmos tx.
 func (k Keeper) GetTransientGasUsed(ctx sdk.Context) uint64 {
-	store := ctx.TransientStore(k.transientKey)
-	return sdk.BigEndianToUint64(store.Get(types.KeyPrefixTransientGasUsed))
+	store := ctx.ObjectStore(k.objectKey)
+	v := store.Get(types.ObjectGasUsedKey(ctx.TxIndex()))
+	if v == nil {
+		return 0
+	}
+	return v.(uint64)
 }
 
 // SetTransientGasUsed sets the gas used by current cosmos tx.
 func (k Keeper) SetTransientGasUsed(ctx sdk.Context, gasUsed uint64) {
-	store := ctx.TransientStore(k.transientKey)
-	bz := sdk.Uint64ToBigEndian(gasUsed)
-	store.Set(types.KeyPrefixTransientGasUsed, bz)
+	store := ctx.ObjectStore(k.objectKey)
+	store.Set(types.ObjectGasUsedKey(ctx.TxIndex()), gasUsed)
 }
 
 // AddTransientGasUsed accumulate gas used by each eth msgs included in current cosmos tx.
@@ -408,22 +446,16 @@ func (k Keeper) AddTransientGasUsed(ctx sdk.Context, gasUsed uint64) (uint64, er
 }
 
 // KVStoreKeys returns KVStore keys injected to keeper
-func (k Keeper) KVStoreKeys() map[string]*storetypes.KVStoreKey {
+func (k Keeper) KVStoreKeys() map[string]storetypes.StoreKey {
 	return k.storeKeys
-}
-
-// SetEvmMempool sets the evm mempool
-func (k *Keeper) SetEvmMempool(evmMempool *evmmempool.ExperimentalEVMMempool) {
-	k.evmMempool = evmMempool
-}
-
-// GetEvmMempool returns the evm mempool
-func (k Keeper) GetEvmMempool() *evmmempool.ExperimentalEVMMempool {
-	return k.evmMempool
 }
 
 // SetHeaderHash sets current block hash into EIP-2935 compatible storage contract.
 func (k Keeper) SetHeaderHash(ctx sdk.Context) {
+	ctx, span := ctx.StartSpan(tracer, "SetHeaderHash", trace.WithAttributes(
+		attribute.Int64("block_height", ctx.BlockHeight()),
+	))
+	defer span.End()
 	window := uint64(types.DefaultHistoryServeWindow)
 	params := k.GetParams(ctx)
 	if params.HistoryServeWindow > 0 {
@@ -442,6 +474,10 @@ func (k Keeper) SetHeaderHash(ctx sdk.Context) {
 
 // GetHeaderHash sets block hash into EIP-2935 compatible storage contract.
 func (k Keeper) GetHeaderHash(ctx sdk.Context, height uint64) common.Hash {
+	ctx, span := ctx.StartSpan(tracer, "GetHeaderHash", trace.WithAttributes(
+		attribute.Int64("height", int64(height)), //nolint:gosec // G115
+	))
+	defer span.End()
 	window := uint64(types.DefaultHistoryServeWindow)
 	params := k.GetParams(ctx)
 	if params.HistoryServeWindow > 0 {

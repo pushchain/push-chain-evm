@@ -3,8 +3,7 @@ package feemarket
 import (
 	"github.com/cosmos/evm/testutil/integration/evm/network"
 
-	storetypes "cosmossdk.io/store/types"
-
+	storetypes "github.com/cosmos/cosmos-sdk/store/v2/types"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 )
 
@@ -31,8 +30,7 @@ func (s *KeeperTestSuite) TestEndBlock() {
 			false,
 			func() {
 				meter := storetypes.NewGasMeter(uint64(1000000000))
-				ctx = ctx.WithBlockGasMeter(meter)
-				nw.App.GetFeeMarketKeeper().SetTransientBlockGasWanted(ctx, 5000000)
+				ctx = ctx.WithBlockGasMeter(meter).WithBlockGasWanted(5000000)
 			},
 			uint64(2500000),
 		},

@@ -5,7 +5,10 @@ import (
 
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/params"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
+	evmtrace "github.com/cosmos/evm/trace"
 	"github.com/cosmos/evm/x/vm/types"
 
 	errorsmod "cosmossdk.io/errors"
@@ -19,7 +22,12 @@ import (
 // GetEthIntrinsicGas returns the intrinsic gas cost for the transaction
 func (k *Keeper) GetEthIntrinsicGas(ctx sdk.Context, msg core.Message, cfg *params.ChainConfig,
 	isContractCreation bool,
-) (uint64, error) {
+) (_ uint64, err error) {
+	ctx, span := ctx.StartSpan(tracer, "GetEthIntrinsicGas", trace.WithAttributes(
+		attribute.Bool("is_contract_creation", isContractCreation),
+		attribute.Int("data_size", len(msg.Data)),
+	))
+	defer func() { evmtrace.EndSpanErr(span, err) }()
 	height := big.NewInt(ctx.BlockHeight())
 	homestead := cfg.IsHomestead(height)
 	istanbul := cfg.IsIstanbul(height)
@@ -33,7 +41,10 @@ func (k *Keeper) GetEthIntrinsicGas(ctx sdk.Context, msg core.Message, cfg *para
 // returned by the EVM execution, thus ignoring the previous intrinsic gas consumed during in the
 // AnteHandler.
 // and then burns baseFee amount from the sender account.
-func (k *Keeper) RefundGas(ctx sdk.Context, msg core.Message, leftoverGas uint64, gasUsed uint64, baseFee *big.Int, denom string) error {
+func (k *Keeper) RefundGas(ctx sdk.Context, msg core.Message, leftoverGas uint64, gasUsed uint64, baseFee *big.Int, denom string) (err error) {
+	ctx, span := ctx.StartSpan(tracer, "RefundGas", trace.WithAttributes(attribute.Int64("leftover_gas", int64(leftoverGas)))) //nolint:gosec // G115
+	defer func() { evmtrace.EndSpanErr(span, err) }()
+
 	// Return EVM tokens for remaining gas, exchanged at the original rate.
 	remaining := new(big.Int).Mul(new(big.Int).SetUint64(leftoverGas), msg.GasPrice)
 
@@ -54,7 +65,12 @@ func (k *Keeper) RefundGas(ctx sdk.Context, msg core.Message, leftoverGas uint64
 		refundedCoins := sdk.Coins{sdk.NewCoin(denom, sdkmath.NewIntFromBigInt(refundAmt))}
 
 		// refund to sender from the fee collector module account, which is the escrow account in charge of collecting tx fees
-		err := k.bankWrapper.SendCoinsFromModuleToAccount(ctx, authtypes.FeeCollectorName, msg.From.Bytes(), refundedCoins)
+		var err error
+		if k.virtualFeeCollection {
+			err = k.bankWrapper.SendCoinsFromModuleToAccountVirtual(ctx, authtypes.FeeCollectorName, msg.From.Bytes(), refundedCoins)
+		} else {
+			err = k.bankWrapper.SendCoinsFromModuleToAccount(ctx, authtypes.FeeCollectorName, msg.From.Bytes(), refundedCoins)
+		}
 		if err != nil {
 			err = errorsmod.Wrapf(errortypes.ErrInsufficientFunds, "fee collector account failed to refund fees: %s", err.Error())
 			return errorsmod.Wrapf(err, "failed to refund %d leftover gas (%s)", leftoverGas, refundedCoins.String())
@@ -77,6 +93,10 @@ func (k *Keeper) RefundGas(ctx sdk.Context, msg core.Message, leftoverGas uint64
 // 'gasUsed'
 func (k *Keeper) ResetGasMeterAndConsumeGas(ctx sdk.Context, gasUsed uint64) {
 	// reset the gas count
+	ctx, span := ctx.StartSpan(tracer, "ResetGasMeterAndConsumeGas", trace.WithAttributes(
+		attribute.Int64("gas_used", int64(gasUsed)), //nolint:gosec // G115
+	))
+	defer span.End()
 	ctx.GasMeter().RefundGas(ctx.GasMeter().GasConsumed(), "reset the gas count")
 	ctx.GasMeter().ConsumeGas(gasUsed, "apply evm transaction")
 }

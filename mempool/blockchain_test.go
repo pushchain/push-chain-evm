@@ -12,21 +12,27 @@ import (
 
 	cmtproto "github.com/cometbft/cometbft/proto/tendermint/types"
 
-	"github.com/cosmos/evm/config"
 	"github.com/cosmos/evm/mempool"
 	"github.com/cosmos/evm/mempool/mocks"
+	"github.com/cosmos/evm/testutil/constants"
 	"github.com/cosmos/evm/x/vm/statedb"
 	vmtypes "github.com/cosmos/evm/x/vm/types"
 
-	"cosmossdk.io/log"
-	storetypes "cosmossdk.io/store/types"
+	"cosmossdk.io/log/v2"
 
+	storetypes "github.com/cosmos/cosmos-sdk/store/v2/types"
+	"github.com/cosmos/cosmos-sdk/testutil"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 )
 
-// createMockContext creates a basic mock context for testing
+// createMockContext creates a basic mock context for testing with multistore
 func createMockContext() sdk.Context {
-	return sdk.Context{}.
+	// crate ctx with multistore so that CacheContext() can be used
+	storeKey := storetypes.NewKVStoreKey("test")
+	transientKey := storetypes.NewTransientStoreKey("transient_test")
+	ctx := testutil.DefaultContext(storeKey, transientKey)
+
+	return ctx.
 		WithBlockTime(time.Now()).
 		WithBlockHeader(cmtproto.Header{AppHash: []byte("00000000000000000000000000000000")}).
 		WithBlockHeight(1).
@@ -39,10 +45,10 @@ func TestBlockchainRaceCondition(t *testing.T) {
 	logger := log.NewNopLogger()
 
 	// Create mock keepers using generated mocks
-	mockVMKeeper := mocks.NewVMKeeper(t)
+	mockVMKeeper := mocks.NewVMKeeperI(t)
 	mockFeeMarketKeeper := mocks.NewFeeMarketKeeper(t)
 
-	ethCfg := vmtypes.DefaultChainConfig(config.EighteenDecimalsChainID)
+	ethCfg := vmtypes.DefaultChainConfig(constants.EighteenDecimalsChainID)
 	if err := vmtypes.SetChainConfig(ethCfg); err != nil {
 		panic(err)
 	}
@@ -57,9 +63,6 @@ func TestBlockchainRaceCondition(t *testing.T) {
 	mockVMKeeper.On("GetCodeHash", mock.Anything, common.Address{}).Return(common.Hash{}).Maybe()
 	mockVMKeeper.On("ForEachStorage", mock.Anything, common.Address{}, mock.AnythingOfType("func(common.Hash, common.Hash) bool")).Maybe()
 	mockVMKeeper.On("KVStoreKeys").Return(make(map[string]*storetypes.KVStoreKey)).Maybe()
-
-	err := vmtypes.NewEVMConfigurator().WithEVMCoinInfo(config.ChainsCoinInfo[config.EighteenDecimalsChainID]).Configure()
-	require.NoError(t, err)
 
 	// Mock context callback that returns a valid context
 	getCtxCallback := func(height int64, prove bool) (sdk.Context, error) {

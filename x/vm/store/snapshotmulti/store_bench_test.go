@@ -8,13 +8,13 @@ import (
 
 	dbm "github.com/cosmos/cosmos-db"
 
-	"cosmossdk.io/store/cachekv"
-	"cosmossdk.io/store/dbadapter"
-	"cosmossdk.io/store/types"
+	"github.com/cosmos/cosmos-sdk/store/v2/cachekv"
+	"github.com/cosmos/cosmos-sdk/store/v2/dbadapter"
+	"github.com/cosmos/cosmos-sdk/store/v2/types"
 )
 
 var (
-	benchSink    interface{}
+	benchSink    any
 	benchTxCount = flag.Int("bench.numtx", 256, "number of transactions per benchmark run")
 )
 

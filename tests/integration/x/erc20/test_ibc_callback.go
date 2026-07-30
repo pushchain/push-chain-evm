@@ -6,24 +6,28 @@ import (
 	"math/big"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/stretchr/testify/mock"
 
+	evm "github.com/cosmos/evm"
 	"github.com/cosmos/evm/contracts"
 	"github.com/cosmos/evm/crypto/ethsecp256k1"
 	"github.com/cosmos/evm/testutil"
 	"github.com/cosmos/evm/utils"
 	"github.com/cosmos/evm/x/erc20/keeper"
 	"github.com/cosmos/evm/x/erc20/types"
+	erc20mocks "github.com/cosmos/evm/x/erc20/types/mocks"
 	"github.com/cosmos/evm/x/vm/statedb"
 	evmtypes "github.com/cosmos/evm/x/vm/types"
-	transfertypes "github.com/cosmos/ibc-go/v10/modules/apps/transfer/types"
-	clienttypes "github.com/cosmos/ibc-go/v10/modules/core/02-client/types"
-	channeltypes "github.com/cosmos/ibc-go/v10/modules/core/04-channel/types"
-	ibcgotesting "github.com/cosmos/ibc-go/v10/testing"
-	ibcmock "github.com/cosmos/ibc-go/v10/testing/mock"
+	transfertypes "github.com/cosmos/ibc-go/v11/modules/apps/transfer/types"
+	clienttypes "github.com/cosmos/ibc-go/v11/modules/core/02-client/types"
+	channeltypes "github.com/cosmos/ibc-go/v11/modules/core/04-channel/types"
+	ibcgotesting "github.com/cosmos/ibc-go/v11/testing"
+	ibcmock "github.com/cosmos/ibc-go/v11/testing/mock"
 
 	"cosmossdk.io/math"
 
 	"github.com/cosmos/cosmos-sdk/crypto/keys/secp256k1"
+	storetypes "github.com/cosmos/cosmos-sdk/store/v2/types"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	authtypes "github.com/cosmos/cosmos-sdk/x/auth/types"
 	govtypes "github.com/cosmos/cosmos-sdk/x/gov/types"
@@ -281,6 +285,8 @@ func (s *KeeperTestSuite) TestOnRecvPacketRegistered() {
 			denom := transfertypes.NewDenom(registeredDenom, hop)
 			s.network.App.GetTransferKeeper().SetDenom(ctx, denom)
 
+			ibcKeeper := s.network.App.(evm.IBCKeeperProvider).GetIBCKeeper()
+
 			// Set Cosmos Channel
 			channel := channeltypes.Channel{
 				State:          channeltypes.INIT,
@@ -288,10 +294,10 @@ func (s *KeeperTestSuite) TestOnRecvPacketRegistered() {
 				Counterparty:   channeltypes.NewCounterparty(transfertypes.PortID, sourceChannel),
 				ConnectionHops: []string{sourceChannel},
 			}
-			s.network.App.GetIBCKeeper().ChannelKeeper.SetChannel(ctx, transfertypes.PortID, cosmosEVMChannel, channel)
+			ibcKeeper.ChannelKeeper.SetChannel(ctx, transfertypes.PortID, cosmosEVMChannel, channel)
 
 			// Set Next Sequence Send
-			s.network.App.GetIBCKeeper().ChannelKeeper.SetNextSequenceSend(ctx, transfertypes.PortID, cosmosEVMChannel, 1)
+			ibcKeeper.ChannelKeeper.SetNextSequenceSend(ctx, transfertypes.PortID, cosmosEVMChannel, 1)
 
 			tranasferKeeper := s.network.App.GetTransferKeeper()
 			erc20Keeper := keeper.NewKeeper(
@@ -302,7 +308,7 @@ func (s *KeeperTestSuite) TestOnRecvPacketRegistered() {
 				s.network.App.GetBankKeeper(),
 				s.network.App.GetEVMKeeper(),
 				s.network.App.GetStakingKeeper(),
-				&tranasferKeeper,
+				tranasferKeeper,
 			)
 			s.network.App.SetErc20Keeper(erc20Keeper)
 
@@ -453,6 +459,56 @@ func (s *KeeperTestSuite) TestConvertCoinToERC20FromPacket() {
 			}
 		})
 	}
+}
+
+func (s *KeeperTestSuite) TestConvertCoinToERC20FromPacket_GasConfigPreserved() {
+	s.mintFeeCollector = true
+	defer func() { s.mintFeeCollector = false }()
+	s.SetupTest()
+
+	contractAddr, err := s.setupRegisterERC20Pair(contractMinterBurner)
+	s.Require().NoError(err)
+
+	ctx := s.network.GetContext()
+	id := s.network.App.GetErc20Keeper().GetTokenPairID(ctx, contractAddr.String())
+	pair, found := s.network.App.GetErc20Keeper().GetTokenPair(ctx, id)
+	s.Require().True(found)
+
+	// Replace EVMKeeper with a mock so we can capture the ctx forwarded to the EVM.
+	evmMock := new(erc20mocks.EVMKeeper)
+	customKeeper := keeper.NewKeeper(
+		s.network.App.GetKey(types.StoreKey),
+		s.network.App.AppCodec(),
+		authtypes.NewModuleAddress(govtypes.ModuleName),
+		s.network.App.GetAccountKeeper(),
+		s.network.App.GetBankKeeper(),
+		evmMock,
+		s.network.App.GetStakingKeeper(),
+		s.network.App.GetTransferKeeper(),
+	)
+
+	kvGas := storetypes.KVGasConfig()
+	transientGas := storetypes.TransientGasConfig()
+	ctx = ctx.WithKVGasConfig(kvGas).WithTransientKVGasConfig(transientGas)
+
+	var capturedCtx sdk.Context
+	evmMock.On("CallEVM",
+		mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything,
+		mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything,
+	).Run(func(args mock.Arguments) {
+		capturedCtx = args.Get(0).(sdk.Context)
+	}).Return((*evmtypes.MsgEthereumTxResponse)(nil), errors.New("mock evm error"))
+	evmMock.On("KVStoreKeys").Return(map[string]storetypes.StoreKey{}).Maybe()
+
+	sender := sdk.AccAddress(s.keyring.GetAddr(0).Bytes())
+	data := transfertypes.NewFungibleTokenPacketData(pair.Denom, "10", sender.String(), sender.String(), "")
+
+	s.Require().NoError(customKeeper.ConvertCoinToERC20FromPacket(ctx, data))
+
+	// capturedCtx is only set if CallEVM was reached. A zeroed GasConfig would not
+	// equal kvGas, so these assertions also verify that CallEVM was called.
+	s.Require().Equal(kvGas, capturedCtx.KVGasConfig(), "KV gas config must not be zeroed before EVM call")
+	s.Require().Equal(transientGas, capturedCtx.TransientKVGasConfig(), "transient KV gas config must not be zeroed before EVM call")
 }
 
 func (s *KeeperTestSuite) TestOnAcknowledgementPacket() {

@@ -21,7 +21,6 @@ import (
 	"cosmossdk.io/math"
 
 	sdk "github.com/cosmos/cosmos-sdk/types"
-	errortypes "github.com/cosmos/cosmos-sdk/types/errors"
 )
 
 func (s *TestSuite) TestResend() {
@@ -281,7 +280,7 @@ func (s *TestSuite) TestResend() {
 			s.SetupTest() // reset test and queries
 			tc.registerMock()
 
-			hash, err := s.backend.Resend(tc.args, tc.gasPrice, tc.gasLimit)
+			hash, err := s.backend.Resend(s.Ctx(), tc.args, tc.gasPrice, tc.gasLimit)
 
 			if tc.expPass {
 				s.Require().Equal(tc.expHash, hash)
@@ -293,7 +292,7 @@ func (s *TestSuite) TestResend() {
 }
 
 func (s *TestSuite) TestSendRawTransaction() {
-	ethTx, bz := s.buildEthereumTx()
+	ethTx, _ := s.buildEthereumTx()
 
 	emptyEvmChainIDTx := s.buildEthereumTxWithChainID(nil)
 	invalidChainID := big.NewInt(1)
@@ -315,27 +314,18 @@ func (s *TestSuite) TestSendRawTransaction() {
 		expPass      bool
 	}{
 		{
-			"fail - empty bytes",
-			func() {},
-			func() []byte { return []byte{} },
-			common.Hash{},
-			"",
-			false,
+			name:         "fail - empty bytes",
+			registerMock: func() {},
+			rawTx:        func() []byte { return []byte{} },
+			expHash:      common.Hash{},
+			expError:     "",
 		},
 		{
-			"fail - no RLP encoded bytes",
-			func() {},
-			func() []byte { return bz },
-			common.Hash{},
-			"",
-			false,
-		},
-		{
-			"fail - invalid chain-id",
-			func() {
+			name: "fail - invalid chain-id",
+			registerMock: func() {
 				s.backend.AllowUnprotectedTxs = false
 			},
-			func() []byte {
+			rawTx: func() []byte {
 				from, priv := utiltx.NewAddrKey()
 				signer := utiltx.NewSigner(priv)
 				invalidEvmChainIDTx := s.buildEthereumTxWithChainID(invalidChainID)
@@ -345,55 +335,47 @@ func (s *TestSuite) TestSendRawTransaction() {
 				bytes, _ := rlp.EncodeToBytes(invalidEvmChainIDTx.AsTransaction())
 				return bytes
 			},
-			common.Hash{},
-			fmt.Errorf("incorrect chain-id; expected %d, got %d", constants.ExampleChainID.EVMChainID, invalidChainID).Error(),
-			false,
+			expHash:  common.Hash{},
+			expError: fmt.Errorf("incorrect chain-id; expected %d, got %d", constants.ExampleChainID.EVMChainID, invalidChainID).Error(),
 		},
 		{
-			"fail - unprotected tx",
-			func() {
+			name: "fail - unprotected tx",
+			registerMock: func() {
 				s.backend.AllowUnprotectedTxs = false
 			},
-			func() []byte {
+			rawTx: func() []byte {
 				bytes, _ := rlp.EncodeToBytes(emptyEvmChainIDTx.AsTransaction())
 				return bytes
 			},
-			common.Hash{},
-			errors.New("only replay-protected (EIP-155) transactions allowed over RPC").Error(),
-			false,
+			expHash:  common.Hash{},
+			expError: errors.New("only replay-protected (EIP-155) transactions allowed over RPC").Error(),
 		},
 		{
-			"fail - failed to broadcast transaction",
-			func() {
+			name: "fail - queue is full",
+			registerMock: func() {
 				cosmosTx, _ := ethTx.BuildTx(s.backend.ClientCtx.TxConfig.NewTxBuilder(), evmDenom)
-				txBytes, _ := s.backend.ClientCtx.TxConfig.TxEncoder()(cosmosTx)
 
-				client := s.backend.ClientCtx.Client.(*mocks.Client)
 				s.backend.AllowUnprotectedTxs = true
-				RegisterBroadcastTxError(client, txBytes)
+				RegisterMempoolInsert(s.T(), s.Mempool(), cosmosTx, errors.New("queue is full"))
 			},
-			func() []byte {
+			rawTx: func() []byte {
 				bytes, _ := rlp.EncodeToBytes(ethTx.AsTransaction())
 				return bytes
 			},
-			ethTx.Hash(),
-			errortypes.ErrInvalidRequest.Error(),
-			false,
+			expHash:  ethTx.Hash(),
+			expError: "queue is full",
 		},
 		{
-			"pass - Gets the correct transaction hash of the eth transaction",
-			func() {
+			name: "pass - Gets the correct transaction hash of the eth transaction",
+			registerMock: func() {
 				cosmosTx, _ := ethTx.BuildTx(s.backend.ClientCtx.TxConfig.NewTxBuilder(), evmDenom)
-				txBytes, _ := s.backend.ClientCtx.TxConfig.TxEncoder()(cosmosTx)
-
-				client := s.backend.ClientCtx.Client.(*mocks.Client)
 				s.backend.AllowUnprotectedTxs = true
-				RegisterBroadcastTx(client, txBytes)
+
+				RegisterMempoolInsert(s.T(), s.Mempool(), cosmosTx, nil)
 			},
-			func() []byte { return rlpEncodedBz },
-			ethTx.Hash(),
-			"",
-			true,
+			rawTx:   func() []byte { return rlpEncodedBz },
+			expHash: ethTx.Hash(),
+			expPass: true,
 		},
 	}
 
@@ -402,13 +384,12 @@ func (s *TestSuite) TestSendRawTransaction() {
 			s.SetupTest() // reset test and queries
 			tc.registerMock()
 
-			hash, err := s.backend.SendRawTransaction(tc.rawTx())
+			hash, err := s.backend.SendRawTransaction(s.Ctx(), tc.rawTx())
 
 			if tc.expPass {
 				s.Require().Equal(tc.expHash, hash)
 			} else {
-				s.Require().Error(err)
-				s.Require().Contains(err.Error(), tc.expError)
+				s.Require().ErrorContains(err, tc.expError)
 			}
 		})
 	}
@@ -553,7 +534,7 @@ func (s *TestSuite) TestDoCall() {
 			s.SetupTest() // reset test and queries
 			tc.registerMock()
 
-			msgEthTx, err := s.backend.DoCall(tc.callArgs, tc.blockNum, tc.overrides)
+			msgEthTx, err := s.backend.DoCall(s.Ctx(), tc.callArgs, tc.blockNum, tc.overrides)
 
 			if tc.expPass {
 				s.Require().NoError(err)
@@ -618,9 +599,156 @@ func (s *TestSuite) TestGasPrice() {
 			s.SetupTest() // reset test and queries
 			tc.registerMock()
 
-			gasPrice, err := s.backend.GasPrice()
+			gasPrice, err := s.backend.GasPrice(s.Ctx())
 			if tc.expPass {
 				s.Require().Equal(tc.expGas, gasPrice)
+			} else {
+				s.Require().Error(err)
+			}
+		})
+	}
+}
+
+func (s *TestSuite) TestEstimateGas() {
+	gasPrice := (*hexutil.Big)(big.NewInt(1))
+	toAddr := utiltx.GenerateAddress()
+	evmChainID := (*hexutil.Big)(s.backend.EvmChainID)
+	callArgs := evmtypes.TransactionArgs{
+		From:                 nil,
+		To:                   &toAddr,
+		Gas:                  nil,
+		GasPrice:             nil,
+		MaxFeePerGas:         gasPrice,
+		MaxPriorityFeePerGas: gasPrice,
+		Value:                gasPrice,
+		Input:                nil,
+		Data:                 nil,
+		AccessList:           nil,
+		ChainID:              evmChainID,
+	}
+	argsBz, err := json.Marshal(callArgs)
+	s.Require().NoError(err)
+
+	overrides := json.RawMessage(`{
+        "` + toAddr.Hex() + `": {
+            "balance": "0x0"
+        }
+    }`)
+	invalidOverrides := json.RawMessage(`{"invalid": json}`)
+	emptyOverrides := json.RawMessage(`{}`)
+
+	testCases := []struct {
+		name         string
+		registerMock func()
+		callArgs     evmtypes.TransactionArgs
+		overrides    *json.RawMessage
+		expGas       hexutil.Uint64
+		expPass      bool
+	}{
+		{
+			"fail - Invalid request",
+			func() {
+				_, bz := s.buildEthereumTx()
+				client := s.backend.ClientCtx.Client.(*mocks.Client)
+				QueryClient := s.backend.QueryClient.QueryClient.(*mocks.EVMQueryClient)
+				height := int64(1)
+				RegisterHeader(client, &height, bz)
+				RegisterEstimateGasError(QueryClient, &evmtypes.EthCallRequest{Args: argsBz, ChainId: s.backend.EvmChainID.Int64()})
+			},
+			callArgs,
+			nil,
+			0,
+			false,
+		},
+		{
+			"pass - Returned gas estimate",
+			func() {
+				_, bz := s.buildEthereumTx()
+				client := s.backend.ClientCtx.Client.(*mocks.Client)
+				QueryClient := s.backend.QueryClient.QueryClient.(*mocks.EVMQueryClient)
+				height := int64(1)
+				RegisterHeader(client, &height, bz)
+				RegisterEstimateGas(QueryClient, callArgs)
+			},
+			callArgs,
+			nil,
+			21000,
+			true,
+		},
+		{
+			"pass - With state overrides",
+			func() {
+				_, bz := s.buildEthereumTx()
+				client := s.backend.ClientCtx.Client.(*mocks.Client)
+				QueryClient := s.backend.QueryClient.QueryClient.(*mocks.EVMQueryClient)
+				height := int64(1)
+				RegisterHeader(client, &height, bz)
+				expected := &evmtypes.EthCallRequest{
+					Args:      argsBz,
+					ChainId:   s.backend.EvmChainID.Int64(),
+					Overrides: overrides,
+				}
+				RegisterEstimateGasWithOverrides(QueryClient, expected)
+			},
+			callArgs,
+			&overrides,
+			21000,
+			true,
+		},
+		{
+			"fail - Invalid state overrides JSON",
+			func() {
+				_, bz := s.buildEthereumTx()
+				client := s.backend.ClientCtx.Client.(*mocks.Client)
+				QueryClient := s.backend.QueryClient.QueryClient.(*mocks.EVMQueryClient)
+				height := int64(1)
+				RegisterHeader(client, &height, bz)
+				expected := &evmtypes.EthCallRequest{
+					Args:      argsBz,
+					ChainId:   s.backend.EvmChainID.Int64(),
+					Overrides: invalidOverrides,
+				}
+				RegisterEstimateGasError(QueryClient, expected)
+			},
+			callArgs,
+			&invalidOverrides,
+			0,
+			false,
+		},
+		{
+			"pass - Empty state overrides",
+			func() {
+				_, bz := s.buildEthereumTx()
+				client := s.backend.ClientCtx.Client.(*mocks.Client)
+				QueryClient := s.backend.QueryClient.QueryClient.(*mocks.EVMQueryClient)
+				height := int64(1)
+				RegisterHeader(client, &height, bz)
+				expected := &evmtypes.EthCallRequest{
+					Args:      argsBz,
+					ChainId:   s.backend.EvmChainID.Int64(),
+					Overrides: emptyOverrides,
+				}
+				RegisterEstimateGasWithOverrides(QueryClient, expected)
+			},
+			callArgs,
+			&emptyOverrides,
+			21000,
+			true,
+		},
+	}
+
+	for _, tc := range testCases {
+		s.Run(fmt.Sprintf("case %s", tc.name), func() {
+			s.SetupTest() // reset test and queries
+			tc.registerMock()
+
+			blockNum := rpctypes.BlockNumber(1)
+			blockNrOrHash := rpctypes.BlockNumberOrHash{BlockNumber: &blockNum}
+			gas, err := s.backend.EstimateGas(s.Ctx(), tc.callArgs, &blockNrOrHash, tc.overrides)
+
+			if tc.expPass {
+				s.Require().NoError(err)
+				s.Require().Equal(tc.expGas, gas)
 			} else {
 				s.Require().Error(err)
 			}
