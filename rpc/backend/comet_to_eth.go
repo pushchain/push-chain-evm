@@ -424,9 +424,16 @@ func (b *Backend) ReceiptsFromCometBlock(
 		cumulatedGasUsed += txResult.GasUsed
 
 		var effectiveGasPrice *big.Int
-		if baseFee != nil {
+		switch {
+		case additional != nil:
+			// Derived tx: reconstructed with zero fee caps, so the generic EIP-1559
+			// formula would report 0 here and make fee-accounting consumers read the
+			// block as burning more than it collected. Report the base fee, matching
+			// the `gasPrice` served for the same tx by eth_getTransactionByHash.
+			effectiveGasPrice = rpctypes.DerivedTxGasPrice(ethMsg.Raw.Transaction, baseFee)
+		case baseFee != nil:
 			effectiveGasPrice = rpctypes.EffectiveGasPrice(ethMsg.Raw.Transaction, baseFee)
-		} else {
+		default:
 			effectiveGasPrice = ethMsg.Raw.GasFeeCap()
 		}
 

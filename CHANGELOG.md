@@ -16,6 +16,12 @@ Follow the [migration document](docs/migrations/v0.5.x_to_v0.6.0.md) for upgrade
 
 ### BUG FIXES
 
+- Report the block base fee (instead of `0`) as the `gasPrice` of derived EVM transactions in
+  `eth_getTransactionByHash` / `eth_getBlockByNumber`, and as their receipt `effectiveGasPrice`.
+  Derived txs carry zero fee caps, so consumers that model burn as `base_fee * gas_used` — such as
+  Blockscout's block-reward formula — read blocks whose only content is derived txs as burning more
+  than they collected, and render a negative block reward.
+
 ## v0.5.1
 
 ### DEPENDENCIES
