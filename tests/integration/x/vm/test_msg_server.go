@@ -12,6 +12,7 @@ import (
 	sdkmath "cosmossdk.io/math"
 
 	sdktypes "github.com/cosmos/cosmos-sdk/types"
+	errortypes "github.com/cosmos/cosmos-sdk/types/errors"
 	authtypes "github.com/cosmos/cosmos-sdk/x/auth/types"
 	govtypes "github.com/cosmos/cosmos-sdk/x/gov/types"
 )
@@ -258,5 +259,97 @@ func (s *KeeperTestSuite) TestRegisterPreinstalls() {
 
 		err := s.Network.NextBlock()
 		s.Require().NoError(err)
+	}
+}
+
+// TestEthereumTxSenderVerification is the regression guard for F-2026-18197
+// (nested message dispatch bypasses the EVM ante for MsgEthereumTx).
+//
+// The EVM ante handler only runs over the top-level messages of a tx. A module
+// that unpacks and re-dispatches an embedded sdk.Msg (x/authz MsgExec, x/group
+// MsgSubmitProposal/MsgExec, x/gov proposals, a CosmWasm stargate/Any message,
+// ICA) hands the nested message to this msg server with the ante already
+// behind it, so the signature was never checked. Keeper.EthereumTx therefore
+// verifies the sender itself: the declared From must be the ECDSA signer of the
+// raw transaction, whatever route the message took to get here.
+func (s *KeeperTestSuite) TestEthereumTxSenderVerification() {
+	testCases := []struct {
+		name   string
+		mutate func(msg *types.MsgEthereumTx)
+		expErr bool
+	}{
+		{
+			// The ante already ran VerifySender for this path, so the keeper
+			// check is a redundant no-op and normal traffic is unaffected.
+			name:   "pass - untouched victim-signed tx (normal JSON-RPC path)",
+			mutate: func(*types.MsgEthereumTx) {},
+			expErr: false,
+		},
+		{
+			// The attack: take a victim-signed tx off the mempool and push it
+			// through a nested dispatcher, declaring the attacker (or a group
+			// policy / authz grantee account) as the sender so the outer
+			// permission check passes. Recovery still yields the victim.
+			name: "fail - From spoofed to a different account",
+			mutate: func(msg *types.MsgEthereumTx) {
+				msg.From = s.Keyring.GetAddr(1).Bytes()
+			},
+			expErr: true,
+		},
+		{
+			// A module account is derived from a name, never from a key pair,
+			// so no signature can ever recover to it. This is what makes it a
+			// design invariant that module-driven EVM calls go through
+			// ApplyMessage* directly and never through this msg server.
+			name: "fail - From spoofed to a module account",
+			mutate: func(msg *types.MsgEthereumTx) {
+				msg.From = authtypes.NewModuleAddress(govtypes.ModuleName).Bytes()
+			},
+			expErr: true,
+		},
+		{
+			name: "fail - From cleared",
+			mutate: func(msg *types.MsgEthereumTx) {
+				msg.From = nil
+			},
+			expErr: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		s.Run(tc.name, func() {
+			s.SetupTest()
+
+			victim := s.Keyring.GetKey(0)
+			recipient := s.Keyring.GetAddr(1)
+			tx, err := s.Factory.GenerateSignedEthTx(victim.Priv, types.EvmTxArgs{
+				To:     &recipient,
+				Amount: big.NewInt(1e10),
+			})
+			s.Require().NoError(err)
+
+			msg := tx.GetMsgs()[0].(*types.MsgEthereumTx)
+			s.Require().Equal(victim.Addr.Bytes(), msg.From, "sanity: tx must be signed by the victim")
+			tc.mutate(msg)
+
+			ctx := s.Network.GetContext()
+			res, err := s.Network.App.GetEVMKeeper().EthereumTx(ctx, msg)
+
+			if !tc.expErr {
+				s.Require().NoError(err)
+				s.Require().False(res.Failed())
+				return
+			}
+
+			s.Require().Error(err)
+			s.Require().ErrorIs(err, errortypes.ErrorInvalidSigner)
+			s.Require().Contains(err.Error(), "signature verification failed")
+			// The transaction must not have been applied at all.
+			s.Require().Nil(res)
+			s.Require().False(
+				utils.ContainsEventType(ctx.EventManager().Events().ToABCIEvents(), types.EventTypeEthereumTx),
+				"a rejected tx must not emit an ethereum_tx event",
+			)
+		})
 	}
 }

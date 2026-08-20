@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
+	"math/big"
 	"strconv"
 
 	"github.com/hashicorp/go-metrics"
+
+	ethtypes "github.com/ethereum/go-ethereum/core/types"
 
 	cmttypes "github.com/cometbft/cometbft/types"
 
@@ -17,6 +20,7 @@ import (
 
 	"github.com/cosmos/cosmos-sdk/telemetry"
 	sdk "github.com/cosmos/cosmos-sdk/types"
+	errortypes "github.com/cosmos/cosmos-sdk/types/errors"
 	govtypes "github.com/cosmos/cosmos-sdk/x/gov/types"
 )
 
@@ -30,6 +34,29 @@ func (k *Keeper) EthereumTx(goCtx context.Context, msg *types.MsgEthereumTx) (*t
 	ctx := sdk.UnwrapSDKContext(goCtx)
 
 	tx := msg.AsTransaction()
+
+	// Verify that msg.From really is the ECDSA signer of the transaction.
+	//
+	// This is normally established by the EVM ante handler
+	// (ante/evm/05_signature_verification.go), but the ante chain only runs over
+	// the *top-level* messages of a tx. Any module that unpacks an embedded
+	// sdk.Msg and re-dispatches it through the message router - x/authz MsgExec,
+	// x/group MsgSubmitProposal/MsgExec, x/gov proposals, a CosmWasm
+	// stargate/Any message, ICA - delivers the nested message here with the ante
+	// already behind it, so nothing has checked the signature. An attacker could
+	// then take any victim-signed transaction off the mempool and have it
+	// executed as the victim. Checking here means the executor never trusts an
+	// unverified From, whatever route the message took to reach it.
+	//
+	// Cost on the normal path is ~zero: msg.AsTransaction() hands back the same
+	// *ethtypes.Transaction the ante verified, and go-ethereum caches the
+	// recovered sender on it per signer, so this is a cache hit rather than a
+	// second ECDSA recovery.
+	signer := ethtypes.MakeSigner(types.GetEthChainConfig(), big.NewInt(ctx.BlockHeight()), uint64(ctx.BlockTime().Unix())) //#nosec G115 -- int overflow is not a concern here
+	if err := msg.VerifySender(signer); err != nil {
+		return nil, errorsmod.Wrapf(errortypes.ErrorInvalidSigner, "signature verification failed: %s", err.Error())
+	}
+
 	txIndex := k.GetTxIndexTransient(ctx)
 
 	labels := []metrics.Label{
