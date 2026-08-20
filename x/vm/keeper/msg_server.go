@@ -34,6 +34,13 @@ func (k *Keeper) EthereumTx(goCtx context.Context, msg *types.MsgEthereumTx) (*t
 	ctx := sdk.UnwrapSDKContext(goCtx)
 
 	tx := msg.AsTransaction()
+	// MsgEthereumTx.Raw unmarshals to a nil transaction when the raw field is
+	// empty, and ValidateBasic is part of the same ante path that a nested
+	// message skips, so the executor cannot assume it ran. Fail cleanly instead
+	// of dereferencing nil below.
+	if tx == nil {
+		return nil, errorsmod.Wrap(errortypes.ErrInvalidRequest, "invalid transaction: raw ethereum transaction is empty")
+	}
 
 	// Verify that msg.From really is the ECDSA signer of the transaction.
 	//

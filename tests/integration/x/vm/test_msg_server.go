@@ -316,6 +316,15 @@ func (s *KeeperTestSuite) TestEthereumTxSenderVerification() {
 		},
 	}
 
+	s.Run("fail - empty raw transaction", func() {
+		s.SetupTest()
+		// Raw unmarshals to a nil transaction when the field is empty, and
+		// ValidateBasic lives in the same ante path a nested message skips.
+		_, err := s.Network.App.GetEVMKeeper().EthereumTx(s.Network.GetContext(), &types.MsgEthereumTx{})
+		s.Require().Error(err)
+		s.Require().ErrorIs(err, errortypes.ErrInvalidRequest)
+	})
+
 	for _, tc := range testCases {
 		s.Run(tc.name, func() {
 			s.SetupTest()
