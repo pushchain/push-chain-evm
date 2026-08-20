@@ -10,6 +10,12 @@
 
 ### BUG FIXES
 
+- Verify the Ethereum sender in `Keeper.EthereumTx` before applying the transaction. The EVM ante
+  handler only runs over a tx's top-level messages, so an `MsgEthereumTx` nested inside a
+  dispatching module (`x/authz`, `x/group`, `x/gov`, a CosmWasm stargate/`Any` message, ICA) reached
+  the executor with its signature never checked, letting a victim-signed transaction be replayed as
+  the victim. `VerifySender` is now required before `ApplyTransaction`, so `From` is always the
+  ECDSA-recovered signer regardless of how the message arrived.
 - [\#690](https://github.com/cosmos/evm/pull/690) Fix Ledger hardware wallet support for coin type 60.
 - [\#769](https://github.com/cosmos/evm/pull/769) Fix erc20 ibc middleware to not to validate sender address format.
 - [\#790](https://github.com/cosmos/evm/pull/790) fix panic in historical query due to missing EvmCoinInfo.
