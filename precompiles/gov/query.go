@@ -4,6 +4,8 @@ import (
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/core/vm"
 
+	vmstoretypes "github.com/cosmos/evm/x/vm/store/types"
+
 	sdk "github.com/cosmos/cosmos-sdk/types"
 )
 
@@ -136,13 +138,50 @@ func (p *Precompile) GetTallyResult(
 		return nil, err
 	}
 
-	res, err := p.govQuerier.TallyResult(ctx, queryTallyResultReq)
+	// The SDK's TallyResult query is *not* read-only for a proposal in the voting
+	// period: it delegates to the gov Keeper.Tally, which deletes every vote it
+	// counts (x/gov/keeper/tally.go). That is safe on the SDK's own query paths
+	// because a gRPC query runs against a context whose writes are never committed.
+	//
+	// Precompiles break that invariant: RunNativeAction commits the state DB cache
+	// context unconditionally, so a store write performed here would survive the
+	// enclosing EVM transaction and a plain CALL to getTallyResult would wipe the
+	// proposal's votes. Run the query against a throwaway cache instead, so the
+	// deletions are discarded while the tally itself -- delegations, weighted votes,
+	// validator defaults -- is still the one the SDK computes.
+	cacheCtx, discardWrites := newDiscardedCacheContext(ctx)
+	defer discardWrites()
+
+	res, err := p.govQuerier.TallyResult(cacheCtx, queryTallyResultReq)
 	if err != nil {
 		return nil, err
 	}
 
 	output := new(TallyResultOutput).FromResponse(res)
 	return method.Outputs.Pack(output.TallyResult)
+}
+
+// newDiscardedCacheContext returns a context to run a query on, together with the
+// function that throws away every store write the query performed. The caller is
+// expected to always call it -- the writes are never meant to reach the parent
+// store.
+//
+// sdk.Context.CacheContext alone is not enough inside a precompile. It defers to
+// the underlying multi store's CacheMultiStore, and while the SDK's stores return
+// a detached cache whose writes only reach the parent through the (here dropped)
+// write function, the store the EVM runs precompiles on does not:
+// x/vm/store/snapshotmulti pushes a snapshot layer and returns the very same
+// store, so the layer stays live and is flushed along with everything else when
+// the state DB commits. On that store the layer has to be popped explicitly,
+// which is what the snapshot/revert pair below does.
+func newDiscardedCacheContext(ctx sdk.Context) (sdk.Context, func()) {
+	if snapshotter, ok := ctx.MultiStore().(vmstoretypes.Snapshotter); ok {
+		snapshot := snapshotter.Snapshot()
+		return ctx, func() { snapshotter.RevertToSnapshot(snapshot) }
+	}
+
+	cacheCtx, _ := ctx.CacheContext() // write function intentionally discarded
+	return cacheCtx, func() {}
 }
 
 // GetProposal implements the query logic for getting a proposal

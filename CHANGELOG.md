@@ -10,6 +10,12 @@
 
 ### BUG FIXES
 
+- Run the gov precompile's `getTallyResult` against a throwaway cache. The SDK's `TallyResult` query
+  delegates to `Keeper.Tally`, which deletes every vote it counts; that is safe on the SDK's own
+  query paths because a gRPC query runs against a context that is never committed, but precompiles
+  commit their state DB cache context unconditionally. A plain EVM call to `getTallyResult` on a
+  proposal in the voting period therefore deleted that proposal's votes permanently. The query's
+  store writes are now discarded, leaving the tally itself unchanged.
 - Verify the Ethereum sender in `Keeper.EthereumTx` before applying the transaction. The EVM ante
   handler only runs over a tx's top-level messages, so an `MsgEthereumTx` nested inside a
   dispatching module (`x/authz`, `x/group`, `x/gov`, a CosmWasm stargate/`Any` message, ICA) reached
