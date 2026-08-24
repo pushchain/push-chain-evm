@@ -111,6 +111,14 @@ func TestParseAmount(t *testing.T) {
 			expAmt: uint256.NewInt(5),
 		},
 		{
+			name: "unrelated denom is ignored",
+			maleate: func() sdk.Event {
+				coinStr := sdk.NewCoins(sdk.NewInt64Coin("foobar", 7)).String()
+				return sdk.NewEvent("bank", sdk.NewAttribute(sdk.AttributeKeyAmount, coinStr))
+			},
+			expAmt: uint256.NewInt(0),
+		},
+		{
 			name: "missing amount",
 			maleate: func() sdk.Event {
 				return sdk.NewEvent("bank")
@@ -184,6 +192,51 @@ func TestAfterBalanceChange(t *testing.T) {
 
 	require.Equal(t, "2", stateDB.GetBalance(spender).String())
 	require.Equal(t, "3", stateDB.GetBalance(receiver).String())
+}
+
+// TestAfterBalanceChangeSpendMoreThanBalancePanics reproduces the F-2026-18201
+// attack path at the precompile boundary: the EVM state view only tracks
+// SPENDABLE balance, but a vesting account can delegate LOCKED coins through the
+// staking precompile. That emits a coin_spent event for more than the StateDB
+// holds. Before the underflow guard the subtraction wrapped to ~2^256, and
+// x/vm/keeper/statedb.go reconciled the bogus view back to bank by MINTING the
+// difference. It must now hard-fail instead.
+func TestAfterBalanceChangeSpendMoreThanBalancePanics(t *testing.T) {
+	setupBalanceHandlerTest(t)
+
+	storeKey := storetypes.NewKVStoreKey("test")
+	tKey := storetypes.NewTransientStoreKey("test_t")
+	ctx := sdktestutil.DefaultContext(storeKey, tKey)
+
+	stateDB := statedb.New(ctx, mocks.NewEVMKeeper(), statedb.NewEmptyTxConfig())
+
+	_, addrs, err := testutil.GeneratePrivKeyAddressPairs(1)
+	require.NoError(t, err)
+	spenderAcc := addrs[0]
+	spender := common.BytesToAddress(spenderAcc)
+
+	// Spendable balance as seen by the EVM.
+	stateDB.AddBalance(spender, uint256.NewInt(5), tracing.BalanceChangeUnspecified)
+
+	bankKeeper := cmnmocks.NewBankKeeper(t)
+	bankKeeper.Mock.On("BlockedAddr", mock.AnythingOfType("types.AccAddress")).Return(false)
+
+	bh := cmn.NewBalanceHandlerFactory(bankKeeper).NewBalanceHandler()
+	bh.BeforeBalanceChange(ctx)
+
+	// Delegating locked coins spends more than the spendable balance.
+	ctx.EventManager().EmitEvents(sdk.Events{
+		banktypes.NewCoinSpentEvent(spenderAcc, sdk.NewCoins(sdk.NewInt64Coin(evmtypes.GetEVMCoinDenom(), 10))),
+	})
+
+	require.PanicsWithValue(
+		t,
+		"state balance underflow for "+spender.Hex()+": have=5 sub=10",
+		func() { _ = bh.AfterBalanceChange(ctx, stateDB) },
+	)
+
+	// The balance must not have wrapped around to ~2^256.
+	require.Equal(t, "5", stateDB.GetBalance(spender).String())
 }
 
 func TestAfterBalanceChangeErrors(t *testing.T) {
