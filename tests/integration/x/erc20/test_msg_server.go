@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/mock"
 	"go.uber.org/mock/gomock"
 
+	"github.com/cosmos/evm/contracts"
 	"github.com/cosmos/evm/testutil/integration/base/factory"
 	"github.com/cosmos/evm/testutil/integration/evm/utils"
 	"github.com/cosmos/evm/x/erc20/keeper"
@@ -102,13 +103,17 @@ func (s *KeeperTestSuite) TestConvertERC20NativeERC20() {
 			false,
 		},
 		{
-			"pass - delayed malicious contract",
+			// The contract grants a third party an allowance over the escrow
+			// module on every `transfer`, which would leave the minted coins
+			// unbacked once that allowance is spent. The unexpected `Approval`
+			// event in the transfer logs must abort the conversion.
+			"fail - delayed malicious contract",
 			10,
 			10,
 			func(common.Address) {},
 			func() {},
 			contractMaliciousDelayed,
-			true,
+			false,
 			false,
 		},
 		{
@@ -384,6 +389,150 @@ func (s *KeeperTestSuite) TestConvertERC20NativeERC20() {
 		})
 	}
 	s.mintFeeCollector = false
+}
+
+// TestConvertERC20MaliciousApprovalKeepsEscrowInvariant asserts the escrow-and-mint invariant
+// for the ERC20 -> Coin direction when the registered token hides an allowance grant inside its
+// `transfer`. The module's balance check alone is satisfied by such a token - the escrow only
+// drains later, when the third party spends the allowance - so the conversion has to be rejected
+// on the unexpected `Approval` event. Asserting the error is not enough: the point of the fix is
+// that no coins get minted against an escrow that can be emptied afterwards.
+func (s *KeeperTestSuite) TestConvertERC20MaliciousApprovalKeepsEscrowInvariant() {
+	s.mintFeeCollector = true
+	defer func() {
+		s.mintFeeCollector = false
+	}()
+	s.SetupTest()
+
+	contractAddr, err := s.setupRegisterERC20Pair(contractMaliciousDelayed)
+	s.Require().NoError(err)
+	s.Require().NotEqual(common.Address{}, contractAddr)
+
+	var (
+		erc20ABI  = contracts.ERC20MinterBurnerDecimalsContract.ABI
+		sender    = s.keyring.GetAccAddr(0)
+		senderHex = s.keyring.GetAddr(0)
+		amount    = math.NewInt(10)
+		denom     = types.CreateDenom(contractAddr.String())
+	)
+
+	_, err = s.MintERC20Token(contractAddr, senderHex, amount.BigInt())
+	s.Require().NoError(err)
+
+	ctx := s.network.GetContext()
+	erc20Keeper := s.network.App.GetErc20Keeper()
+	bankKeeper := s.network.App.GetBankKeeper()
+
+	escrowBefore := erc20Keeper.BalanceOf(ctx, erc20ABI, contractAddr, types.ModuleAddress)
+	s.Require().NotNil(escrowBefore)
+	senderTokensBefore := erc20Keeper.BalanceOf(ctx, erc20ABI, contractAddr, senderHex)
+	s.Require().NotNil(senderTokensBefore)
+	supplyBefore := bankKeeper.GetSupply(ctx, denom)
+	coinsBefore := bankKeeper.GetBalance(ctx, sender, denom)
+	s.Require().True(supplyBefore.IsZero(), "no coins should exist for the pair yet")
+
+	convertMsg := types.NewMsgConvertERC20(amount, sender, contractAddr, senderHex)
+
+	// Direct keeper call on a throwaway branch, to pin the rejection reason.
+	cacheCtx, _ := ctx.CacheContext()
+	_, err = erc20Keeper.ConvertERC20(cacheCtx, convertMsg)
+	s.Require().Error(err)
+	s.Require().ErrorContains(err, "unexpected Approval event")
+
+	// Same message through a real tx, so the failed message's writes are rolled back
+	// exactly as they would be on chain. The gas limit is set explicitly because the
+	// factory would otherwise simulate the tx, and the simulation fails for the same reason.
+	gasLimit := uint64(1_000_000)
+	res, err := s.factory.CommitCosmosTx(s.keyring.GetPrivKey(0), factory.CosmosTxArgs{
+		Gas:  &gasLimit,
+		Msgs: []sdk.Msg{convertMsg},
+	})
+	s.Require().NoError(err)
+	s.Require().NotEqual(uint32(0), res.Code, "expected the conversion tx to fail, got log: %s", res.Log)
+	s.Require().Contains(res.Log, "unexpected Approval event")
+
+	// Invariant: nothing escrowed, nothing minted.
+	ctx = s.network.GetContext()
+
+	escrowAfter := erc20Keeper.BalanceOf(ctx, erc20ABI, contractAddr, types.ModuleAddress)
+	s.Require().NotNil(escrowAfter)
+	s.Require().Zero(escrowBefore.Cmp(escrowAfter), "escrow moved: before %s, after %s", escrowBefore, escrowAfter)
+
+	senderTokensAfter := erc20Keeper.BalanceOf(ctx, erc20ABI, contractAddr, senderHex)
+	s.Require().NotNil(senderTokensAfter)
+	s.Require().Zero(senderTokensBefore.Cmp(senderTokensAfter), "sender tokens moved: before %s, after %s", senderTokensBefore, senderTokensAfter)
+
+	supplyAfter := bankKeeper.GetSupply(ctx, denom)
+	s.Require().True(supplyAfter.IsZero(), "unbacked coins were minted: %s", supplyAfter)
+	s.Require().Equal(supplyBefore, supplyAfter)
+	s.Require().Equal(coinsBefore, bankKeeper.GetBalance(ctx, sender, denom))
+}
+
+// TestConvertCoinMaliciousApprovalKeepsEscrowInvariant covers the Coin -> ERC20 direction of the
+// same guard. Here the hidden allowance is granted over the receiver rather than the module, so
+// the unescrow must be rejected before any token leaves escrow and before the coins are burned.
+//
+// The whole exercise runs on a throwaway branch of the context: the malicious pair can never
+// reach this state through committed txs, because the ERC20 -> Coin leg that would normally mint
+// the coins is itself rejected by the same guard.
+func (s *KeeperTestSuite) TestConvertCoinMaliciousApprovalKeepsEscrowInvariant() {
+	s.mintFeeCollector = true
+	defer func() {
+		s.mintFeeCollector = false
+	}()
+	s.SetupTest()
+
+	contractAddr, err := s.setupRegisterERC20Pair(contractMaliciousDelayed)
+	s.Require().NoError(err)
+	s.Require().NotEqual(common.Address{}, contractAddr)
+
+	var (
+		erc20ABI    = contracts.ERC20MinterBurnerDecimalsContract.ABI
+		sender      = s.keyring.GetAccAddr(0)
+		receiverHex = s.keyring.GetAddr(1)
+		amount      = math.NewInt(10)
+		denom       = types.CreateDenom(contractAddr.String())
+	)
+
+	// Fund the escrow directly: `mint` does not route through the malicious `transfer`.
+	_, err = s.MintERC20Token(contractAddr, types.ModuleAddress, amount.BigInt())
+	s.Require().NoError(err)
+
+	erc20Keeper := s.network.App.GetErc20Keeper()
+	bankKeeper := s.network.App.GetBankKeeper()
+
+	ctx, _ := s.network.GetContext().CacheContext()
+
+	// Give the sender the matching coins, as a successful ERC20 -> Coin leg would have.
+	coins := sdk.Coins{sdk.Coin{Denom: denom, Amount: amount}}
+	s.Require().NoError(bankKeeper.MintCoins(ctx, types.ModuleName, coins))
+	s.Require().NoError(bankKeeper.SendCoinsFromModuleToAccount(ctx, types.ModuleName, sender, coins))
+
+	escrowBefore := erc20Keeper.BalanceOf(ctx, erc20ABI, contractAddr, types.ModuleAddress)
+	s.Require().NotNil(escrowBefore)
+	s.Require().Zero(escrowBefore.Cmp(amount.BigInt()), "escrow should hold the minted tokens")
+	receiverTokensBefore := erc20Keeper.BalanceOf(ctx, erc20ABI, contractAddr, receiverHex)
+	s.Require().NotNil(receiverTokensBefore)
+	supplyBefore := bankKeeper.GetSupply(ctx, denom)
+
+	// baseapp runs every message on its own branch and drops it when the message errors;
+	// mirror that here so the assertions below see what the chain would have kept.
+	msgCtx, _ := ctx.CacheContext()
+	convertMsg := types.NewMsgConvertCoin(coins[0], receiverHex, sender)
+	_, err = erc20Keeper.ConvertCoin(msgCtx, convertMsg)
+	s.Require().Error(err)
+	s.Require().ErrorContains(err, "unexpected Approval event")
+
+	// Invariant: escrow untouched, receiver got nothing, coins not burned.
+	escrowAfter := erc20Keeper.BalanceOf(ctx, erc20ABI, contractAddr, types.ModuleAddress)
+	s.Require().NotNil(escrowAfter)
+	s.Require().Zero(escrowBefore.Cmp(escrowAfter), "escrow moved: before %s, after %s", escrowBefore, escrowAfter)
+
+	receiverTokensAfter := erc20Keeper.BalanceOf(ctx, erc20ABI, contractAddr, receiverHex)
+	s.Require().NotNil(receiverTokensAfter)
+	s.Require().Zero(receiverTokensBefore.Cmp(receiverTokensAfter), "receiver tokens moved: before %s, after %s", receiverTokensBefore, receiverTokensAfter)
+
+	s.Require().Equal(supplyBefore, bankKeeper.GetSupply(ctx, denom), "coins were burned without releasing tokens")
 }
 
 func (s *KeeperTestSuite) TestConvertNativeERC20ToEVMERC20() {
