@@ -19,6 +19,15 @@ import (
 
 var _ statedb.Keeper = &Keeper{}
 
+// NewStateDB returns a fresh StateDB bound to this keeper and ctx, using an
+// empty TxConfig. It is a convenience for callers that reach the EVM keeper
+// through an interface (e.g. other Cosmos modules) and therefore cannot call
+// statedb.New directly, but must supply a non-nil StateDB to CallEVM /
+// ApplyMessage as required since cosmos/evm v0.6.0.
+func (k *Keeper) NewStateDB(ctx sdk.Context) *statedb.StateDB {
+	return statedb.New(ctx, k, statedb.NewEmptyTxConfig())
+}
+
 // ----------------------------------------------------------------------------
 // StateDB Keeper implementation
 // ----------------------------------------------------------------------------

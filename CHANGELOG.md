@@ -1,5 +1,27 @@
 # CHANGELOG
 
+## v0.6.0
+
+Follow the [migration document](docs/migrations/v0.5.x_to_v0.6.0.md) for upgrade instructions.
+
+### BREAKING CHANGES
+- Removed IBC Transfer wrapper. Users are now required to use the precompile to transfer ERC20 tokens.
+- Added StateDB as a parameter to internal EVM calls.
+
+### DEPENDENCIES
+
+### IMPROVEMENTS
+
+### FEATURES
+
+### BUG FIXES
+
+- Report the block base fee (instead of `0`) as the `gasPrice` of derived EVM transactions in
+  `eth_getTransactionByHash` / `eth_getBlockByNumber`, and as their receipt `effectiveGasPrice`.
+  Derived txs carry zero fee caps, so consumers that model burn as `base_fee * gas_used` — such as
+  Blockscout's block-reward formula — read blocks whose only content is derived txs as burning more
+  than they collected, and render a negative block reward.
+
 ## v0.5.1
 
 ### DEPENDENCIES
@@ -56,6 +78,8 @@
 - [\#730](https://github.com/cosmos/evm/pull/730) Fix panic if evm mempool not used.
 - [\#733](https://github.com/cosmos/evm/pull/733) Avoid rejecting tx with unsupported extension option for ExtensionOptionDynamicFeeTx.
 - [\#736](https://github.com/cosmos/evm/pull/736) Add InitEvmCoinInfo upgrade to avoid panic when denom is not registered.
+- Add `stateDB` and `callFromPrecompile` parameters to internal EVM messages.
+- Fixed an issue with events missing from final transaction result.
 
 ### IMPROVEMENTS
 

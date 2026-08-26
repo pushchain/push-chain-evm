@@ -18,7 +18,7 @@ import (
 
 const (
 	upgradeHeight int64 = 22
-	upgradeName         = "v0.4.0-to-v0.5.0" // must match UpgradeName in evmd/upgrades.go
+	upgradeName         = "v0.5.0-to-v0.6.0" // must match UpgradeName in evmd/upgrades.go
 )
 
 func TestChainUpgrade(t *testing.T) {
@@ -31,7 +31,7 @@ func TestChainUpgrade(t *testing.T) {
 	currentBranchBinary := systest.Sut.ExecBinary()
 	currentInitializer := systest.Sut.TestnetInitializer()
 
-	legacyBinary := systest.WorkDir + "/binaries/v0.4/evmd"
+	legacyBinary := systest.WorkDir + "/binaries/v0.5/evmd"
 	systest.Sut.SetExecBinary(legacyBinary)
 	systest.Sut.SetTestnetInitializer(systest.InitializerWithBinary(legacyBinary, systest.Sut))
 	systest.Sut.SetupChain()
@@ -76,7 +76,11 @@ func TestChainUpgrade(t *testing.T) {
 		}(i)
 	}
 
-	systest.Sut.AwaitBlockHeight(t, upgradeHeight-1, 60*time.Second)
+	// Allow enough time to reach the pre-upgrade height. The systemtests block
+	// time is --block-time=5s (timeout_commit 4.5s), so reaching block
+	// upgradeHeight-1 from genesis takes ~(upgradeHeight-1)*5s ≈ 100s — well over
+	// the original hardcoded 60s, which timed out on slower CI runners.
+	systest.Sut.AwaitBlockHeight(t, upgradeHeight-1, 180*time.Second)
 	t.Logf("current_height: %d\n", systest.Sut.CurrentHeight())
 	raw = cli.CustomQuery("q", "gov", "proposal", proposalID)
 	proposalStatus := gjson.Get(raw, "proposal.status").String()

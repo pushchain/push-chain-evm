@@ -61,25 +61,41 @@ func setDisplayDenom(displayDenom string) error {
 	return nil
 }
 
+// getTestingEvmCoinInfo returns the configured testing coin info, falling back to
+// a non-nil zero value when it is momentarily nil.
+//
+// NOTE (push-chain): the configurator resets the global to nil (resetEVMCoinInfo)
+// before re-setting it between test cases, creating a brief window in which a
+// leaked background goroutine — e.g. the legacypool reorg loop of a torn-down
+// test network — can read it and panic. This mirrors the production
+// getEvmCoinInfo() nil-guard in denom_config.go (added for the same class of
+// "coin info accessed before initialization" issue). Test-only (build tag test).
+func getTestingEvmCoinInfo() *EvmCoinInfo {
+	if testingEvmCoinInfo == nil {
+		return &EvmCoinInfo{}
+	}
+	return testingEvmCoinInfo
+}
+
 // GetEVMCoinDecimals returns the decimals used in the representation of the EVM
 // coin.
 func GetEVMCoinDecimals() Decimals {
-	return Decimals(testingEvmCoinInfo.Decimals)
+	return Decimals(getTestingEvmCoinInfo().Decimals)
 }
 
 // GetEVMCoinDenom returns the denom used for the EVM coin.
 func GetEVMCoinDenom() string {
-	return testingEvmCoinInfo.Denom
+	return getTestingEvmCoinInfo().Denom
 }
 
 // GetEVMCoinExtendedDenom returns the extended denom used for the EVM coin.
 func GetEVMCoinExtendedDenom() string {
-	return testingEvmCoinInfo.ExtendedDenom
+	return getTestingEvmCoinInfo().ExtendedDenom
 }
 
 // GetEVMCoinDisplayDenom returns the display denom used for the EVM coin.
 func GetEVMCoinDisplayDenom() string {
-	return testingEvmCoinInfo.DisplayDenom
+	return getTestingEvmCoinInfo().DisplayDenom
 }
 
 // setTestingEVMCoinInfo allows to define denom and decimals of the coin used in the EVM.
