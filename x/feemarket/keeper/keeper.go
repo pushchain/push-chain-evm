@@ -1,6 +1,8 @@
 package keeper
 
 import (
+	gomath "math"
+
 	"github.com/cosmos/evm/x/feemarket/types"
 
 	"cosmossdk.io/log"
@@ -75,9 +77,15 @@ func (k Keeper) SetTransientBlockGasWanted(ctx sdk.Context, gasWanted uint64) {
 	store.Set(types.KeyPrefixTransientBlockGasWanted, gasBz)
 }
 
-// AddTransientGasWanted adds the cumulative gas wanted in the transient store
+// AddTransientGasWanted adds the cumulative gas wanted in the transient store.
+// The sum saturates instead of wrapping: a wrapped total would silently
+// under-report the block's gas wanted to the base fee calculation.
 func (k Keeper) AddTransientGasWanted(ctx sdk.Context, gasWanted uint64) (uint64, error) {
-	result := k.GetTransientGasWanted(ctx) + gasWanted
+	current := k.GetTransientGasWanted(ctx)
+	result := current + gasWanted
+	if result < current {
+		result = gomath.MaxUint64
+	}
 	k.SetTransientBlockGasWanted(ctx, result)
 	return result, nil
 }

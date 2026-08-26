@@ -3,6 +3,7 @@ package keeper
 import (
 	"errors"
 	"fmt"
+	gomath "math"
 
 	"github.com/cosmos/evm/x/feemarket/types"
 
@@ -57,16 +58,21 @@ func (k *Keeper) EndBlock(ctx sdk.Context) error {
 	gasWanted := math.NewIntFromUint64(k.GetTransientGasWanted(ctx))
 	gasUsed := math.NewIntFromUint64(ctx.BlockGasMeter().GasConsumedToLimit())
 
+	// Clamp rather than error. Both quantities are uint64 sums that can exceed
+	// MaxInt64 without any single transaction being individually rejectable,
+	// and this runs in EndBlock: an error here surfaces through FinalizeBlock
+	// after the block has already been decided, which stops the chain. A base
+	// fee computed from a clamped total is a far better outcome than a halt.
+	// MinGasMultiplier is validated to be <= 1, so MaxInt64 stays convertible
+	// to uint64 in the calculation below.
 	if !gasWanted.IsInt64() {
-		err := fmt.Errorf("integer overflow by integer type conversion. Gas wanted > MaxInt64. Gas wanted: %s", gasWanted)
-		k.Logger(ctx).Error(err.Error())
-		return err
+		k.Logger(ctx).Error("gas wanted exceeds MaxInt64, clamping", "gas_wanted", gasWanted.String())
+		gasWanted = math.NewInt(gomath.MaxInt64)
 	}
 
 	if !gasUsed.IsInt64() {
-		err := fmt.Errorf("integer overflow by integer type conversion. Gas used > MaxInt64. Gas used: %s", gasUsed)
-		k.Logger(ctx).Error(err.Error())
-		return err
+		k.Logger(ctx).Error("gas used exceeds MaxInt64, clamping", "gas_used", gasUsed.String())
+		gasUsed = math.NewInt(gomath.MaxInt64)
 	}
 
 	// to prevent BaseFee manipulation we limit the gasWanted so that
