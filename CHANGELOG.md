@@ -10,6 +10,15 @@
 
 ### BUG FIXES
 
+- Resolve the ABI method at the top of every stateful precompile's `Run`, before `RunNativeAction`
+  is entered. The native-action preamble takes a cache context, snapshots the multi-store and
+  commits the state DB cache - replaying the caller's entire dirty account and storage set - and
+  only then does `SetupABI` get around to resolving the selector and failing. `RequiredGas` returns
+  0 for an unresolvable selector, so none of that work was charged: a contract could dirty a large
+  storage set and then hand `bank`, `gov`, `staking`, `distribution`, `ics20`, `slashing`, `erc20`
+  or `werc20` four random bytes to have the whole set replayed for free, up to 20 times per
+  transaction. The check goes through the new `cmn.ResolveMethod`, which `SetupABI` now also uses,
+  so the fallback/receive special cases WERC20 depends on keep working and the revert is unchanged.
 - Make `ConvertCoinNativeERC20` atomic. It escrowed the sender's coins onto the erc20 module
   account before calling the EVM, and `CallEVMWithData` caches only the EVM execution, so a VM
   failure discarded the EVM cache while leaving the bank escrow committed. On the IBC error-ACK /
