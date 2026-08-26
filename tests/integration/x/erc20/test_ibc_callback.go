@@ -771,3 +771,130 @@ func (s *KeeperTestSuite) TestOnTimeoutPacket() {
 		})
 	}
 }
+
+// setupUnbackedPairAndFundSender registers a native-ERC20 pair and funds the
+// sender with the paired bank denom, while deliberately leaving the erc20 module
+// account with NO token balance to unescrow from.
+//
+// That produces the exact failure shape F-2026-18819 needs. Walking
+// convertCoinNativeERC20 in order:
+//
+//	balanceOf(receiver)              -> succeeds (a plain view)
+//	SendCoinsFromAccountToModule     -> succeeds, coins now on the module
+//	CallEVM "transfer"               -> REVERTS, module holds nothing to send
+//
+// The failure therefore lands strictly after the bank mutation, which is the
+// only ordering that can strand the sender's coins. Pausing the token does not
+// work here: it fails the balanceOf read instead, before any escrow happens, and
+// the test would pass vacuously.
+//
+// It returns a context fetched *after* the deployment: the suite's contract
+// deployment only becomes visible to EVM reads on a context taken afterwards, so
+// reusing an earlier one makes balanceOf return nil and the conversion fail
+// before it ever escrows.
+func (s *KeeperTestSuite) setupUnbackedPairAndFundSender(
+	sender sdk.AccAddress, fund math.Int,
+) (sdk.Context, types.TokenPair) {
+	contractAddr, err := s.setupRegisterERC20Pair(contractMinterBurner)
+	s.Require().NoError(err, "failed to register pair")
+
+	ctx := s.network.GetContext()
+
+	id := s.network.App.GetErc20Keeper().GetTokenPairID(ctx, contractAddr.String())
+	pair, found := s.network.App.GetErc20Keeper().GetTokenPair(ctx, id)
+	s.Require().True(found)
+
+	s.Require().NoError(testutil.FundAccount(
+		ctx, s.network.App.GetBankKeeper(), sender,
+		sdk.NewCoins(sdk.NewCoin(pair.Denom, fund)),
+	))
+
+	// Sanity: the module must hold no tokens, or the transfer would succeed and
+	// the test would prove nothing.
+	moduleTokens := s.network.App.GetErc20Keeper().BalanceOf(
+		ctx, contracts.ERC20MinterBurnerDecimalsContract.ABI, contractAddr, types.ModuleAddress,
+	)
+	s.Require().NotNil(moduleTokens, "balanceOf must work - the failure has to come from transfer")
+	s.Require().Zero(moduleTokens.Sign(), "module must have nothing to unescrow")
+
+	return ctx, pair
+}
+
+// TestConvertCoinNativeERC20RollsBackEscrowOnEVMFailure is the direct guard for
+// F-2026-18819.
+//
+// ConvertCoinNativeERC20 escrows the sender's coins onto the erc20 module
+// account and only then calls the EVM. CallEVM caches solely the EVM execution,
+// so before the fix a VM failure discarded the EVM cache but left the bank
+// escrow committed - the sender's coins ended up stranded on a module account
+// with no user-facing way to reclaim them.
+//
+// Asserting on the error alone would not catch that. The assertions that matter
+// are the balances.
+func (s *KeeperTestSuite) TestConvertCoinNativeERC20RollsBackEscrowOnEVMFailure() {
+	s.mintFeeCollector = true
+	defer func() { s.mintFeeCollector = false }()
+	s.SetupTest()
+
+	bankKeeper := s.network.App.GetBankKeeper()
+	moduleAcc := authtypes.NewModuleAddress(types.ModuleName)
+
+	senderPk := secp256k1.GenPrivKey()
+	sender := sdk.AccAddress(senderPk.PubKey().Address())
+
+	ctx, pair := s.setupUnbackedPairAndFundSender(sender, math.NewInt(100))
+
+	senderBefore := bankKeeper.GetBalance(ctx, sender, pair.Denom)
+	moduleBefore := bankKeeper.GetBalance(ctx, moduleAcc, pair.Denom)
+	supplyBefore := bankKeeper.GetSupply(ctx, pair.Denom)
+	s.Require().Equal(math.NewInt(100), senderBefore.Amount)
+
+	err := s.network.App.GetErc20Keeper().ConvertCoinNativeERC20(
+		ctx, pair, math.NewInt(10), common.BytesToAddress(sender), sender, false,
+	)
+	s.Require().Error(err, "a paused token must fail the unescrow transfer")
+
+	s.Require().Equal(senderBefore, bankKeeper.GetBalance(ctx, sender, pair.Denom),
+		"sender must keep every coin - the escrow has to roll back with the EVM failure")
+	s.Require().Equal(moduleBefore, bankKeeper.GetBalance(ctx, moduleAcc, pair.Denom),
+		"no coins may be stranded on the erc20 module account")
+	s.Require().Equal(supplyBefore, bankKeeper.GetSupply(ctx, pair.Denom),
+		"a failed conversion must not burn supply")
+}
+
+// TestConvertCoinToERC20FromPacketLeavesRefundWithSender covers the same defect
+// one layer up, on the path that actually made it permanent.
+//
+// The IBC error-ACK / timeout wrapper deliberately swallows a conversion failure
+// so a failed re-wrap cannot undo the refund itself, and the block commits. The
+// doc comments on OnAcknowledgementPacket / OnTimeoutPacket promise that the
+// user "receives the corresponding bank token from the TokenPair instead" - this
+// pins that promise down.
+func (s *KeeperTestSuite) TestConvertCoinToERC20FromPacketLeavesRefundWithSender() {
+	s.mintFeeCollector = true
+	defer func() { s.mintFeeCollector = false }()
+	s.SetupTest()
+
+	bankKeeper := s.network.App.GetBankKeeper()
+	moduleAcc := authtypes.NewModuleAddress(types.ModuleName)
+
+	senderPk := secp256k1.GenPrivKey()
+	sender := sdk.AccAddress(senderPk.PubKey().Address())
+
+	ctx, pair := s.setupUnbackedPairAndFundSender(sender, math.NewInt(100))
+
+	senderBefore := bankKeeper.GetBalance(ctx, sender, pair.Denom)
+	moduleBefore := bankKeeper.GetBalance(ctx, moduleAcc, pair.Denom)
+
+	data := transfertypes.NewFungibleTokenPacketData(pair.Denom, "10", sender.String(), "", "")
+
+	// The wrapper swallows the conversion error by design; the IBC lifecycle
+	// must continue.
+	err := s.network.App.GetErc20Keeper().ConvertCoinToERC20FromPacket(ctx, data)
+	s.Require().NoError(err, "the refund path must not surface the conversion failure")
+
+	s.Require().Equal(senderBefore, bankKeeper.GetBalance(ctx, sender, pair.Denom),
+		"the refunded coins must still be with the sender, who can retry the conversion")
+	s.Require().Equal(moduleBefore, bankKeeper.GetBalance(ctx, moduleAcc, pair.Denom),
+		"the refund must not be stranded on the erc20 module account")
+}

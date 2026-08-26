@@ -34,6 +34,17 @@ func TestValidateApprovalEventDoesNotExist(t *testing.T) {
 			expectError: false,
 		},
 		{
+			name: "anonymous log without topics",
+			res: &types.MsgEthereumTxResponse{
+				Logs: []*types.Log{
+					{
+						Topics: []string{},
+					},
+				},
+			},
+			expectError: false,
+		},
+		{
 			name: "has approval event",
 			res: &types.MsgEthereumTxResponse{
 				Logs: []*types.Log{

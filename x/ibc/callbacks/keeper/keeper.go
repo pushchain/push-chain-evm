@@ -425,14 +425,19 @@ func (k ContractKeeper) IBCOnTimeoutPacketCallback(
 		return err
 	}
 
-	res, err := k.evmKeeper.CallEVM(ctx, stateDB, *abi, sender, contractAddr, true, false, math.NewIntFromUint64(cachedCtx.GasMeter().GasRemaining()).BigInt(), "onPacketTimeout",
+	// NOTE: use the cached ctx for the EVM calls, as the acknowledgement path
+	// does. Running on the parent ctx committed the callback's EVM state
+	// regardless of the outcome and made writeFn() below a no-op, while the gas
+	// cap was still being read off cachedCtx (F-2026-18818). The StateDB above is
+	// likewise branched off cachedCtx, so the two must agree.
+	res, err := k.evmKeeper.CallEVM(cachedCtx, stateDB, *abi, sender, contractAddr, true, false, math.NewIntFromUint64(cachedCtx.GasMeter().GasRemaining()).BigInt(), "onPacketTimeout",
 		packet.GetSourceChannel(), packet.GetSourcePort(), packet.GetSequence(), packet.GetData())
 	if err != nil {
 		return errorsmod.Wrapf(types.ErrCallbackFailed, "EVM returned error: %s", err.Error())
 	}
 
 	// Consume the actual gas used on the original callback context.
-	ctx.GasMeter().ConsumeGas(res.GasUsed, "callback onPacketAcknowledgement")
+	ctx.GasMeter().ConsumeGas(res.GasUsed, "callback onPacketTimeout")
 	if ctx.GasMeter().IsOutOfGas() {
 		return errorsmod.Wrapf(types.ErrCallbackFailed, "out of gas")
 	}

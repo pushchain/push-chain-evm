@@ -83,13 +83,68 @@ func (k Keeper) ConvertCoin(
 }
 
 // ConvertCoinNativeERC20 handles the coin conversion for a native ERC20 token
-// pair:
+// pair. It runs the conversion atomically: the bank escrow, the EVM transfer and
+// the burn either all commit or none of them do.
+//
+// The atomicity is load-bearing, not cosmetic. The body escrows coins onto the
+// module account before calling the EVM, and the EVM call isolates only the EVM
+// execution — so on a VM failure the bank escrow used to survive, stranding the
+// sender's coins on the erc20 module account with no user-facing way to reclaim
+// them. The IBC refund path (see ConvertCoinToERC20FromPacket) swallows this
+// error and commits the block, which made that stranding permanent
+// (F-2026-18819).
+//
+// As of v0.6.0 this branch is the ONLY rollback boundary around the escrow.
+// CallEVMWithData no longer wraps ApplyMessage in its own ctx.CacheContext(): the
+// caller supplies the StateDB and ApplyMessageWithConfig commits it whenever
+// commit is true, reverted frames included (it relies on the EVM's own
+// RevertToSnapshot having already unwound them). Do not remove the CacheContext
+// below on the grounds that "the EVM call rolls itself back" — the bank escrow is
+// a plain SDK store write and was never part of what the EVM rolls back.
+func (k Keeper) ConvertCoinNativeERC20(
+	ctx sdk.Context,
+	pair types.TokenPair,
+	amount math.Int,
+	receiver common.Address,
+	sender sdk.AccAddress,
+	callFromPrecompile bool,
+) error {
+	// CacheContext branches the multistore and installs a fresh EventManager;
+	// writeCache replays those events onto the parent and commits the branch.
+	// Nothing is written unless the whole conversion succeeded.
+	//
+	// Note the gas meter is *shared* with the parent, so work done on a
+	// discarded branch is still charged. That is intended — a failed conversion
+	// should not be free.
+	cacheCtx, writeCache := ctx.CacheContext()
+
+	if err := k.convertCoinNativeERC20(cacheCtx, pair, amount, receiver, sender, callFromPrecompile); err != nil {
+		// Branch discarded: the escrow, the EVM state and any events go with it.
+		return err
+	}
+
+	writeCache()
+
+	return nil
+}
+
+// convertCoinNativeERC20 is the non-atomic body of ConvertCoinNativeERC20:
 //   - escrow Coins on module account
 //   - unescrow Tokens that have been previously escrowed with ConvertERC20 and send to receiver
 //   - burn escrowed Coins
 //   - check if token balance increased by amount
 //   - check for unexpected `Approval` event in logs
-func (k Keeper) ConvertCoinNativeERC20(ctx sdk.Context, pair types.TokenPair, amount math.Int, receiver common.Address, sender sdk.AccAddress, callFromPrecompile bool) error {
+//
+// It mutates ctx directly and must only be called on a branched context — see
+// ConvertCoinNativeERC20.
+func (k Keeper) convertCoinNativeERC20(
+	ctx sdk.Context,
+	pair types.TokenPair,
+	amount math.Int,
+	receiver common.Address,
+	sender sdk.AccAddress,
+	callFromPrecompile bool,
+) error {
 	if !amount.IsPositive() {
 		return sdkerrors.Wrap(types.ErrNegativeToken, "converted coin amount must be positive")
 	}
@@ -129,6 +184,11 @@ func (k Keeper) ConvertCoinNativeERC20(ctx sdk.Context, pair types.TokenPair, am
 		if !unpackedRet.Value {
 			return sdkerrors.Wrap(errortypes.ErrLogic, "failed to execute unescrow tokens from user")
 		}
+	}
+
+	// Check for unexpected `Approval` event in logs
+	if err := validateApprovalEventDoesNotExist(res.Logs); err != nil {
+		return err
 	}
 
 	// Check expected Receiver balance after transfer execution

@@ -90,6 +90,16 @@ func (k Keeper) ConvertERC20IntoCoinsForNativeToken(ctx sdk.Context, stateDB *st
 		}
 	}
 
+	// Check for unexpected `Approval` event in logs (F-2026-18822).
+	// v0.6.0 lifted this body out of msg_server.convertERC20IntoCoinsForNativeToken
+	// into this shared helper and dropped the guard on the way, even though the
+	// doc comment above still promises it. Re-applied here, in the same position
+	// it held before the move, so both the msg server and the ICS20 precompile
+	// path are covered.
+	if err := validateApprovalEventDoesNotExist(res.Logs); err != nil {
+		return nil, err
+	}
+
 	// Check expected escrow balance after transfer execution
 	coins := sdk.Coins{sdk.Coin{Denom: pair.Denom, Amount: amount}}
 	tokens := coins[0].Amount.BigInt()

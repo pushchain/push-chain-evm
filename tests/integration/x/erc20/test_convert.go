@@ -102,13 +102,20 @@ func (s *KeeperTestSuite) TestConvertERC20IntoCoinsForNativeToken() {
 			false,
 		},
 		{
-			"pass - delayed malicious contract",
+			// The contract grants a third party an allowance over the escrow
+			// module on every `transfer`, which would leave the minted coins
+			// unbacked once that allowance is spent. The unexpected `Approval`
+			// event in the transfer logs must abort the conversion
+			// (F-2026-18822). Upstream v0.6.0 still expects this to pass because
+			// it moved this body into x/erc20/keeper/convert.go without the
+			// validateApprovalEventDoesNotExist guard.
+			"fail - delayed malicious contract",
 			10,
 			10,
 			func(common.Address) {},
 			func() {},
 			contractMaliciousDelayed,
-			true,
+			false,
 			false,
 		},
 		{

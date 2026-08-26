@@ -2,6 +2,7 @@ package keeper
 
 import (
 	"encoding/json"
+	"math"
 	"math/big"
 	"strconv"
 
@@ -49,12 +50,30 @@ func (k Keeper) CallEVMWithData(ctx sdk.Context, stateDB *statedb.StateDB, from 
 		return nil, err
 	}
 
+	// Honour the caller's gasCap. Callers that pass one (the IBC callback keeper
+	// passes the remaining Cosmos gas) are trying to sandbox the EVM work; before
+	// F-2026-18818 this parameter was accepted and silently ignored, so the EVM
+	// always ran to DefaultGasCap and could burn far more gas than the caller had
+	// budgeted. DefaultGasCap stays the ceiling, so a caller can only ever narrow
+	// the limit, never widen it. Mirrors DerivedEVMCallWithData, and matches the
+	// shape upstream cosmos/evm settled on.
+	gasLimit := config.DefaultGasCap
+	if gasCap != nil && gasCap.Sign() > 0 {
+		// A gasCap wider than uint64 cannot be a meaningful limit; fall back to
+		// the default ceiling rather than truncating it.
+		if gasCap.BitLen() <= 64 {
+			if provided := gasCap.Uint64(); provided < gasLimit {
+				gasLimit = provided
+			}
+		}
+	}
+
 	msg := core.Message{
 		From:       from,
 		To:         contract,
 		Nonce:      nonce,
 		Value:      big.NewInt(0),
-		GasLimit:   config.DefaultGasCap,
+		GasLimit:   gasLimit,
 		GasPrice:   big.NewInt(0),
 		GasTipCap:  big.NewInt(0),
 		GasFeeCap:  big.NewInt(0),
@@ -66,18 +85,32 @@ func (k Keeper) CallEVMWithData(ctx sdk.Context, stateDB *statedb.StateDB, from 
 	// StateDB (returns ErrNilStateDB). Pass it (and callFromPrecompile) straight
 	// through so that contract — and the precompile snapshot/flush chain — is
 	// preserved.
+	//
+	// This replaces the ctx.CacheContext() sandbox the pre-v0.6.0 code wrapped
+	// around ApplyMessage: state isolation on a revert is now the StateDB's
+	// journal/snapshot job, not a store branch. Gas accounting is unaffected —
+	// ApplyMessage never touches ctx.GasMeter(), so the explicit ConsumeGas calls
+	// below remain the only charge to the parent meter, exactly as before.
 	res, err := k.ApplyMessage(ctx, stateDB, msg, nil, commit, callFromPrecompile, true)
 	if err != nil {
 		return nil, err
 	}
 
 	if res.Failed() {
-		// push-chain audit fix: unlike upstream we deliberately do NOT call
-		// k.ResetGasMeterAndConsumeGas(ctx, ctx.GasMeter().Limit()) here. Consuming
-		// the full gas limit on a revert can overflow the parent gas meter. We
-		// surface the VM error and leave the gas consumed during execution in
-		// place; the EVM has already rolled back the reverted call frame via its
-		// own snapshot, so no extra state isolation is required.
+		// A failed execution still burned real EVM work, so charge it to the parent
+		// Cosmos gas meter exactly like a successful one (F-2026-18824). Skipping
+		// this made a revert (or a deliberate out-of-gas) a free way to consume
+		// block compute. msg.GasLimit above is config.DefaultGasCap, which a
+		// caller-supplied gasCap can only narrow, so res.GasUsed — which equals the
+		// gas limit on out-of-gas — is bounded by that cap and cannot be inflated by
+		// the caller.
+		//
+		// Note we charge exactly res.GasUsed and, unlike upstream, deliberately do
+		// NOT call k.ResetGasMeterAndConsumeGas(ctx, ctx.GasMeter().Limit()):
+		// consuming the full gas limit on a revert can overflow the parent gas
+		// meter. The EVM has already rolled back the reverted call frame via its own
+		// snapshot, so no extra state isolation is required.
+		ctx.GasMeter().ConsumeGas(res.GasUsed, "apply evm message (failed)")
 		return res, errorsmod.Wrap(types.ErrVMExecution, res.VmError)
 	}
 
@@ -185,7 +218,29 @@ func (k Keeper) DerivedEVMCallWithData(
 		gasCap = gasRes.Gas
 	}
 	if gasLimit != nil {
-		gasCap = gasLimit.Uint64()
+		// Reject a limit that does not fit in uint64 instead of truncating it.
+		// big.Int.Uint64 is documented as undefined for values that do not fit and
+		// in practice returns the low 64 bits, so a payload declaring 2^64+5 would
+		// silently be handed 5 gas and fail with a misleading out-of-gas error.
+		// Node-side validation bounds UniversalPayload.GasLimit to uint256, so
+		// values at or above 2^64 do reach this call. IsUint64 also rejects a
+		// negative limit, for which Uint64 is equally undefined.
+		if !gasLimit.IsUint64() {
+			return nil, errorsmod.Wrapf(
+				types.ErrInvalidGasLimit,
+				"gas limit %s does not fit in uint64 (max %d)",
+				gasLimit, uint64(math.MaxUint64),
+			)
+		}
+		// Clamp the caller-supplied limit to DefaultGasCap. The failure path below
+		// charges res.GasUsed to the parent Cosmos gas meter, and on out-of-gas
+		// res.GasUsed equals this cap — so an unclamped caller value would let the
+		// caller choose how much gas the enclosing Cosmos tx is forced to consume,
+		// and panic it with OutOfGas. DefaultGasCap is already the ceiling on every
+		// other path into this function: the estimator above runs with
+		// GasCap: config.DefaultGasCap, and the remaining branch uses the cap
+		// directly. The clamp therefore only ever narrows an outlier.
+		gasCap = min(gasLimit.Uint64(), config.DefaultGasCap)
 	}
 
 	msg := core.Message{
@@ -321,6 +376,12 @@ func (k Keeper) DerivedEVMCallWithData(
 	}
 
 	if res.Failed() {
+		// A failed execution still burned real EVM work, so charge it to the parent
+		// Cosmos gas meter exactly like a successful one. Skipping this made a
+		// revert (or a deliberate out-of-gas) a free way to consume block compute,
+		// and left the `gasless` flag zeroing only the reported event attribute.
+		// res.GasUsed is bounded by gasCap, clamped to config.DefaultGasCap above.
+		ctx.GasMeter().ConsumeGas(res.GasUsed, "apply evm message (failed)")
 		return res, errorsmod.Wrapf(types.ErrVMExecution, "%s: ret 0x%x", res.VmError, res.Ret)
 	}
 
