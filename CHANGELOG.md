@@ -10,6 +10,15 @@
 
 ### BUG FIXES
 
+- Resolve the ABI method at the top of every stateful precompile's `Run`, before `RunNativeAction`
+  is entered. The native-action preamble takes a cache context, snapshots the multi-store and
+  commits the state DB cache - replaying the caller's entire dirty account and storage set - and
+  only then does `SetupABI` get around to resolving the selector and failing. `RequiredGas` returns
+  0 for an unresolvable selector, so none of that work was charged: a contract could dirty a large
+  storage set and then hand `bank`, `gov`, `staking`, `distribution`, `ics20`, `slashing`, `erc20`
+  or `werc20` four random bytes to have the whole set replayed for free, up to 20 times per
+  transaction. The check goes through the new `cmn.ResolveMethod`, which `SetupABI` now also uses,
+  so the fallback/receive special cases WERC20 depends on keep working and the revert is unchanged.
 - Run the gov precompile's `getTallyResult` against a throwaway cache. The SDK's `TallyResult` query
   delegates to `Keeper.Tally`, which deletes every vote it counts; that is safe on the SDK's own
   query paths because a gRPC query runs against a context that is never committed, but precompiles
