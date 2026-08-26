@@ -60,6 +60,12 @@
   equals the gas cap, so without the clamp the caller would pick how much gas the enclosing
   transaction is forced to consume and could panic it with `OutOfGas`. `CallEVMWithData`
   needs no clamp — its message gas limit is already the hardcoded `config.DefaultGasCap`.
+- Reject a `gasLimit` that does not fit in a `uint64` in `DerivedEVMCallWithData` instead of
+  truncating it. `big.Int.Uint64` is undefined for values that do not fit and in practice returns
+  the low 64 bits, and node-side validation bounds the universal-payload gas limit to `uint256` —
+  so a payload declaring `2^64 + 5` was silently handed **5** gas and failed with a misleading
+  out-of-gas error rather than a clear rejection. The call now returns `ErrInvalidGasLimit` naming
+  the problem; `math.MaxUint64` still fits and is clamped to `config.DefaultGasCap` as before.
 - [\#690](https://github.com/cosmos/evm/pull/690) Fix Ledger hardware wallet support for coin type 60.
 - [\#769](https://github.com/cosmos/evm/pull/769) Fix erc20 ibc middleware to not to validate sender address format.
 - [\#790](https://github.com/cosmos/evm/pull/790) fix panic in historical query due to missing EvmCoinInfo.
