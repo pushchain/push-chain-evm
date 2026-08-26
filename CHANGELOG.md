@@ -22,6 +22,15 @@
   the executor with its signature never checked, letting a victim-signed transaction be replayed as
   the victim. `VerifySender` is now required before `ApplyTransaction`, so `From` is always the
   ECDSA-recovered signer regardless of how the message arrived.
+- Charge the parent Cosmos gas meter for failed EVM calls in `CallEVMWithData` and
+  `DerivedEVMCallWithData`. Both functions returned on `res.Failed()` before reaching
+  `ctx.GasMeter().ConsumeGas(res.GasUsed)`, so a reverting — or deliberately out-of-gas —
+  internal call performed real EVM work that cost the enclosing Cosmos transaction nothing
+  beyond the incidental KV-store gas. `DerivedEVMCallWithData` additionally clamps a
+  caller-supplied `gasLimit` to `config.DefaultGasCap`; on an out-of-gas halt `res.GasUsed`
+  equals the gas cap, so without the clamp the caller would pick how much gas the enclosing
+  transaction is forced to consume and could panic it with `OutOfGas`. `CallEVMWithData`
+  needs no clamp — its message gas limit is already the hardcoded `config.DefaultGasCap`.
 - [\#690](https://github.com/cosmos/evm/pull/690) Fix Ledger hardware wallet support for coin type 60.
 - [\#769](https://github.com/cosmos/evm/pull/769) Fix erc20 ibc middleware to not to validate sender address format.
 - [\#790](https://github.com/cosmos/evm/pull/790) fix panic in historical query due to missing EvmCoinInfo.

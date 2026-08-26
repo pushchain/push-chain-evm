@@ -72,10 +72,9 @@ func (k Keeper) CallEVMWithData(
 		AccessList: ethtypes.AccessList{},
 	}
 
-	// Use a cache context so that a reverting EVM call does not corrupt the
-	// parent gas meter. On success we commit the cache and charge the actual
-	// gas used; on revert we discard the cache and leave the parent meter
-	// untouched (matching DerivedEVMCallWithData semantics).
+	// Use a cache context so that a reverting EVM call does not commit its state
+	// changes. The cache shares the parent gas meter, so gas is metered against
+	// the caller either way; only the store writes are discarded on failure.
 	tmpCtx, commitState := ctx.CacheContext()
 	res, err := k.ApplyMessage(tmpCtx, msg, nil, commit, true)
 	if err != nil {
@@ -83,6 +82,13 @@ func (k Keeper) CallEVMWithData(
 	}
 
 	if res.Failed() {
+		// A failed execution still burned real EVM work, so charge it to the parent
+		// Cosmos gas meter exactly like a successful one. Skipping this made a
+		// revert (or a deliberate out-of-gas) a free way to consume block compute.
+		// msg.GasLimit above is the hardcoded config.DefaultGasCap, so res.GasUsed
+		// — which equals the gas limit on out-of-gas — is bounded by that cap and
+		// cannot be inflated by the caller.
+		ctx.GasMeter().ConsumeGas(res.GasUsed, "apply evm message (failed)")
 		return res, errorsmod.Wrap(types.ErrVMExecution, res.VmError)
 	}
 
@@ -191,7 +197,15 @@ func (k Keeper) DerivedEVMCallWithData(
 		gasCap = gasRes.Gas
 	}
 	if gasLimit != nil {
-		gasCap = gasLimit.Uint64()
+		// Clamp the caller-supplied limit to DefaultGasCap. The failure path below
+		// charges res.GasUsed to the parent Cosmos gas meter, and on out-of-gas
+		// res.GasUsed equals this cap — so an unclamped caller value would let the
+		// caller choose how much gas the enclosing Cosmos tx is forced to consume,
+		// and panic it with OutOfGas. DefaultGasCap is already the ceiling on every
+		// other path into this function: the estimator above runs with
+		// GasCap: config.DefaultGasCap, and the remaining branch uses the cap
+		// directly. The clamp therefore only ever narrows an outlier.
+		gasCap = min(gasLimit.Uint64(), config.DefaultGasCap)
 	}
 
 	msg := core.Message{
@@ -323,6 +337,12 @@ func (k Keeper) DerivedEVMCallWithData(
 	}
 
 	if res.Failed() {
+		// A failed execution still burned real EVM work, so charge it to the parent
+		// Cosmos gas meter exactly like a successful one. Skipping this made a
+		// revert (or a deliberate out-of-gas) a free way to consume block compute,
+		// and left the `gasless` flag zeroing only the reported event attribute.
+		// res.GasUsed is bounded by gasCap, clamped to config.DefaultGasCap above.
+		ctx.GasMeter().ConsumeGas(res.GasUsed, "apply evm message (failed)")
 		return res, errorsmod.Wrapf(types.ErrVMExecution, "%s: ret 0x%x", res.VmError, res.Ret)
 	}
 
