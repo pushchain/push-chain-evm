@@ -91,6 +91,15 @@ func (p Precompile) RequiredGas(input []byte) uint64 {
 }
 
 func (p Precompile) Run(evm *vm.EVM, contract *vm.Contract, readonly bool) ([]byte, error) {
+	// Resolve the target method before RunNativeAction touches any state: the
+	// native-action preamble (cache context, multi-store snapshot, state DB
+	// commit) replays the caller's entire dirty set and is not paid for when the
+	// selector turns out to be unresolvable, because RequiredGas returns 0 for
+	// one. Resolving here keeps the revert identical while skipping that work.
+	if _, err := cmn.ResolveMethod(p.ABI, contract); err != nil {
+		return cmn.ReturnRevertError(evm, err)
+	}
+
 	return p.RunNativeAction(evm, contract, func(ctx sdk.Context) ([]byte, error) {
 		return p.Execute(ctx, evm.StateDB, contract, readonly)
 	})

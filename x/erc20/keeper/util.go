@@ -13,6 +13,10 @@ import (
 // an unexpected `Approval` event
 func validateApprovalEventDoesNotExist(logs []*types.Log) error {
 	for _, log := range logs {
+		// anonymous events (LOG0) carry no topics
+		if len(log.Topics) == 0 {
+			continue
+		}
 		if log.Topics[0] == logApprovalSigHash.Hex() {
 			return errors.Wrapf(
 				types2.ErrUnexpectedEvent, "unexpected Approval event",
