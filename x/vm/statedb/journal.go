@@ -18,33 +18,13 @@ package statedb
 
 import (
 	"bytes"
-	"reflect"
 	"sort"
-	"unsafe"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/holiman/uint256"
 
 	sdk "github.com/cosmos/cosmos-sdk/types"
 )
-
-// overrideEventManagerEvents replaces, in place, the events held by em with the
-// provided events. It mirrors cosmos-sdk v0.53's EventManager.OverrideEvents.
-//
-// NOTE (push-chain): upstream cosmos/evm v0.6.0 calls
-// em.OverrideEvents(prevEvents) directly, but that method only exists on the
-// cosmos-sdk v0.53 EventManager. push-chain pins cosmos-sdk to the v0.50.x line
-// (the rest of v0.6.0 is compatible with it), which has no in-place events
-// setter. The precompile-call revert path REQUIRES an in-place mutation —
-// precompiles obtain the cacheCtx via GetCacheContext(), which shares the same
-// EventManager pointer, so swapping in a fresh EventManager would diverge from
-// those outstanding copies. We therefore set the unexported `events` field
-// directly, which is exactly what OverrideEvents does on v0.53.
-func overrideEventManagerEvents(em sdk.EventManagerI, events sdk.Events) {
-	// The concrete type behind EventManagerI is *sdk.EventManager.
-	f := reflect.ValueOf(em).Elem().FieldByName("events")
-	reflect.NewAt(f.Type(), unsafe.Pointer(f.UnsafeAddr())).Elem().Set(reflect.ValueOf(events))
-}
 
 // JournalEntry is a modification entry in the state change journal that can be
 // Reverted on demand.
@@ -203,10 +183,12 @@ func (pc precompileCallChange) Revert(s *StateDB) {
 	// state stored in the snapshot
 	s.RevertMultiStore(pc.snapshot)
 
-	// Restore events to the state before this precompile call.
-	// Equivalent to s.cacheCtx.EventManager().OverrideEvents(pc.prevEvents); see
-	// overrideEventManagerEvents for why the shim is used.
-	overrideEventManagerEvents(s.cacheCtx.EventManager(), pc.prevEvents)
+	// Restore events to the state before this precompile call. OverrideEvents
+	// sets the manager's events in place (em.events = events), which is required
+	// here: precompiles hold the cacheCtx obtained from GetCacheContext() and
+	// share this EventManager pointer, so replacing the manager would diverge
+	// from those outstanding copies.
+	s.cacheCtx.EventManager().OverrideEvents(pc.prevEvents)
 
 	// Restore processed events counter
 	s.processedEventsCount = pc.prevProcessedEventCount
