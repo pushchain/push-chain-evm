@@ -10,6 +10,28 @@
 
 ### BUG FIXES
 
+- Honour the `gasCap` argument in `CallEVMWithData`. The parameter was accepted and then ignored -
+  `GasLimit` was hardcoded to `config.DefaultGasCap` - so callers passing a cap to sandbox EVM work
+  (the IBC callback keeper passes its remaining Cosmos gas) got a message that could burn up to 25M
+  gas regardless. `DefaultGasCap` remains the ceiling, so a caller can only narrow the limit. This
+  matches `DerivedEVMCallWithData` and the shape upstream cosmos/evm settled on. Also routes the
+  timeout callback's EVM call through `cachedCtx`, as the acknowledgement path already does.
+- Resolve the ABI method at the top of every stateful precompile's `Run`, before `RunNativeAction`
+  is entered. The native-action preamble takes a cache context, snapshots the multi-store and
+  commits the state DB cache - replaying the caller's entire dirty account and storage set - and
+  only then does `SetupABI` get around to resolving the selector and failing. `RequiredGas` returns
+  0 for an unresolvable selector, so none of that work was charged: a contract could dirty a large
+  storage set and then hand `bank`, `gov`, `staking`, `distribution`, `ics20`, `slashing`, `erc20`
+  or `werc20` four random bytes to have the whole set replayed for free, up to 20 times per
+  transaction. The check goes through the new `cmn.ResolveMethod`, which `SetupABI` now also uses,
+  so the fallback/receive special cases WERC20 depends on keep working and the revert is unchanged.
+- Make `ConvertCoinNativeERC20` atomic. It escrowed the sender's coins onto the erc20 module
+  account before calling the EVM, and `CallEVMWithData` caches only the EVM execution, so a VM
+  failure discarded the EVM cache while leaving the bank escrow committed. On the IBC error-ACK /
+  timeout refund path, which deliberately swallows a conversion error so a failed re-wrap cannot
+  undo the refund, that stranded the sender's coins on the module account permanently - contradicting
+  the `OnAcknowledgementPacket` / `OnTimeoutPacket` comments promising the user keeps the bank token.
+  The escrow, the EVM transfer and the burn now all run on a branched context and commit together.
 - Run the gov precompile's `getTallyResult` against a throwaway cache. The SDK's `TallyResult` query
   delegates to `Keeper.Tally`, which deletes every vote it counts; that is safe on the SDK's own
   query paths because a gRPC query runs against a context that is never committed, but precompiles
@@ -29,6 +51,15 @@
   escrow only drains later, when that allowance is spent, leaving the minted coins unbacked. The
   `validateApprovalEventDoesNotExist` guard, already documented by both convert doc-comments but
   never called, now runs on both paths.
+- Charge the parent Cosmos gas meter for failed EVM calls in `CallEVMWithData` and
+  `DerivedEVMCallWithData`. Both functions returned on `res.Failed()` before reaching
+  `ctx.GasMeter().ConsumeGas(res.GasUsed)`, so a reverting — or deliberately out-of-gas —
+  internal call performed real EVM work that cost the enclosing Cosmos transaction nothing
+  beyond the incidental KV-store gas. `DerivedEVMCallWithData` additionally clamps a
+  caller-supplied `gasLimit` to `config.DefaultGasCap`; on an out-of-gas halt `res.GasUsed`
+  equals the gas cap, so without the clamp the caller would pick how much gas the enclosing
+  transaction is forced to consume and could panic it with `OutOfGas`. `CallEVMWithData`
+  needs no clamp — its message gas limit is already the hardcoded `config.DefaultGasCap`.
 - [\#690](https://github.com/cosmos/evm/pull/690) Fix Ledger hardware wallet support for coin type 60.
 - [\#769](https://github.com/cosmos/evm/pull/769) Fix erc20 ibc middleware to not to validate sender address format.
 - [\#790](https://github.com/cosmos/evm/pull/790) fix panic in historical query due to missing EvmCoinInfo.

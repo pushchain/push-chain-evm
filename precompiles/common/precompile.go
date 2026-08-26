@@ -125,14 +125,19 @@ func (p Precompile) runNativeAction(evm *vm.EVM, contract *vm.Contract, action N
 	return bz, nil
 }
 
-// SetupABI runs the initial setup required to run a transaction or a query.
-// It returns the ABI method, initial gas and calling arguments.
-func SetupABI(
-	api abi.ABI,
-	contract *vm.Contract,
-	readOnly bool,
-	isTransaction func(name *abi.Method) bool,
-) (method *abi.Method, args []interface{}, err error) {
+// ResolveMethod resolves the ABI method targeted by the contract calldata.
+//
+// It is the selector-resolution half of SetupABI, exported so that a concrete
+// precompile can reject calldata it cannot dispatch at the very top of its Run,
+// *before* RunNativeAction sets up the native context, snapshots the multi-store
+// and commits the state DB cache. That preamble replays the caller's whole dirty
+// set and is not charged for an unresolvable selector, since RequiredGas also
+// returns 0 for one.
+//
+// SetupABI delegates to this function so the early check and the in-action check
+// can never disagree - notably on the fallback/receive special cases, which the
+// werc20 precompile relies on for empty, short and unknown calldata.
+func ResolveMethod(api abi.ABI, contract *vm.Contract) (method *abi.Method, err error) {
 	// NOTE: This is a special case where the calling transaction does not specify a function name.
 	// In this case we default to a `fallback` or `receive` function on the contract.
 
@@ -144,17 +149,29 @@ func SetupABI(
 	switch {
 	// Case 1: Calldata is empty
 	case isEmptyCallData:
-		method, err = emptyCallData(api, contract)
+		return emptyCallData(api, contract)
 
 	// Case 2: calldata is non-empty but less than 4 bytes needed for a method
 	case isShortCallData:
-		method, err = methodIDCallData(api)
+		return methodIDCallData(api)
 
 	// Case 3: calldata is non-empty and contains the minimum 4 bytes needed for a method
 	case isStandardCallData:
-		method, err = standardCallData(api, contract)
+		return standardCallData(api, contract)
 	}
 
+	return nil, vm.ErrExecutionReverted
+}
+
+// SetupABI runs the initial setup required to run a transaction or a query.
+// It returns the ABI method, initial gas and calling arguments.
+func SetupABI(
+	api abi.ABI,
+	contract *vm.Contract,
+	readOnly bool,
+	isTransaction func(name *abi.Method) bool,
+) (method *abi.Method, args []interface{}, err error) {
+	method, err = ResolveMethod(api, contract)
 	if err != nil {
 		return nil, nil, err
 	}
