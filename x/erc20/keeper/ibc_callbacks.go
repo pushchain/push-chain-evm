@@ -159,8 +159,12 @@ func (k Keeper) OnRecvPacket(
 // is refunded and then the IBC Coins are converted to ERC20.
 // If the ERC20 conversion fails for whatever reason, such as an attempt to call
 // a self-destructed ERC20 contract or an invalid function, OnAcknowledgementPacket
-// still succeeds, but the user receives the corresponding bank token from the
-// TokenPair instead. A user may then manually re-attempt the conversion.
+// still succeeds and the user keeps the corresponding bank token from the
+// TokenPair, so they may manually re-attempt the conversion. That holds only
+// because ConvertCoinNativeERC20 is atomic: it escrows the coins onto the module
+// account before touching the EVM, so without the rollback a VM failure would
+// leave the refund stranded on the module account rather than with the sender
+// (F-2026-18819).
 func (k Keeper) OnAcknowledgementPacket(
 	ctx sdk.Context, _ channeltypes.Packet,
 	data transfertypes.FungibleTokenPacketData,
@@ -181,8 +185,9 @@ func (k Keeper) OnAcknowledgementPacket(
 // since the original packet sent was never received and has been timed out.
 // If the ERC20 conversion fails for whatever reason, such as an attempt to call
 // a self-destructed ERC20 contract or an invalid function, OnTimeoutPacket still
-// succeeds, but the user receives the corresponding bank token from the TokenPair
-// instead. A user may then manually re-attempt the conversion.
+// succeeds and the user keeps the corresponding bank token from the TokenPair,
+// so they may manually re-attempt the conversion. As with OnAcknowledgementPacket
+// that depends on ConvertCoinNativeERC20 being atomic (F-2026-18819).
 func (k Keeper) OnTimeoutPacket(ctx sdk.Context, _ channeltypes.Packet, data transfertypes.FungibleTokenPacketData) error {
 	return k.ConvertCoinToERC20FromPacket(ctx, data)
 }
@@ -235,6 +240,12 @@ func (k Keeper) ConvertCoinToERC20FromPacket(ctx sdk.Context, data transfertypes
 
 		// Convert from Coin to ERC20
 		if err := k.ConvertCoinNativeERC20(ctx, pair, coin.Amount, common.BytesToAddress(sender), sender); err != nil {
+			// Swallowing the error is deliberate: the refund itself already
+			// succeeded and must not be undone by a failure to re-wrap it into
+			// the ERC20 representation. This is only safe because
+			// ConvertCoinNativeERC20 rolls back on failure, so the sender still
+			// holds the bank coins here (F-2026-18819).
+			//
 			// We want to record only the failed attempt to reconvert the coins during IBC.
 			defer func() {
 				telemetry.IncrCounter(1, types.ModuleName, "ibc", "error", "total")

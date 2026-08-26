@@ -10,6 +10,13 @@
 
 ### BUG FIXES
 
+- Make `ConvertCoinNativeERC20` atomic. It escrowed the sender's coins onto the erc20 module
+  account before calling the EVM, and `CallEVMWithData` caches only the EVM execution, so a VM
+  failure discarded the EVM cache while leaving the bank escrow committed. On the IBC error-ACK /
+  timeout refund path, which deliberately swallows a conversion error so a failed re-wrap cannot
+  undo the refund, that stranded the sender's coins on the module account permanently - contradicting
+  the `OnAcknowledgementPacket` / `OnTimeoutPacket` comments promising the user keeps the bank token.
+  The escrow, the EVM transfer and the burn now all run on a branched context and commit together.
 - Run the gov precompile's `getTallyResult` against a throwaway cache. The SDK's `TallyResult` query
   delegates to `Keeper.Tally`, which deletes every vote it counts; that is safe on the SDK's own
   query paths because a gRPC query runs against a context that is never committed, but precompiles
