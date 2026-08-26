@@ -304,26 +304,61 @@ func NewRPCTransactionFromIncompleteMsg(
 	from := msg.GetSender()
 	v, r, s := tx.RawSignatureValues()
 	result := &RPCTransaction{
-		Type:     hexutil.Uint64(tx.Type()),
-		From:     from,
-		Gas:      hexutil.Uint64(tx.Gas()),
-		GasPrice: (*hexutil.Big)(tx.GasPrice()),
-		Hash:     txHash,
-		Input:    hexutil.Bytes(tx.Data()),
-		Nonce:    hexutil.Uint64(tx.Nonce()),
-		To:       tx.To(),
-		Value:    (*hexutil.Big)(tx.Value()),
-		V:        (*hexutil.Big)(v),
-		R:        (*hexutil.Big)(r),
-		S:        (*hexutil.Big)(s),
-		ChainID:  (*hexutil.Big)(chainID),
+		Type:    hexutil.Uint64(tx.Type()),
+		From:    from,
+		Gas:     hexutil.Uint64(tx.Gas()),
+		Hash:    txHash,
+		Input:   hexutil.Bytes(tx.Data()),
+		Nonce:   hexutil.Uint64(tx.Nonce()),
+		To:      tx.To(),
+		Value:   (*hexutil.Big)(tx.Value()),
+		V:       (*hexutil.Big)(v),
+		R:       (*hexutil.Big)(r),
+		S:       (*hexutil.Big)(s),
+		ChainID: (*hexutil.Big)(chainID),
 	}
 	if blockHash != (common.Hash{}) {
 		result.BlockHash = &blockHash
 		result.BlockNumber = (*hexutil.Big)(new(big.Int).SetUint64(blockNumber))
 		result.TransactionIndex = (*hexutil.Uint64)(&index)
+		result.GasPrice = (*hexutil.Big)(DerivedTxGasPrice(tx, baseFee))
+	} else {
+		// Not mined: there is no block base fee to report against, so fall back to
+		// the reconstructed tx's own price.
+		result.GasPrice = (*hexutil.Big)(tx.GasPrice())
 	}
 	return result, nil
+}
+
+// DerivedTxGasPrice returns the gas price to report over JSON-RPC for a derived
+// (protocol-internal, non-user-signed) EVM transaction mined in a block with the
+// given base fee.
+//
+// Derived txs are constructed with zero fee caps — they are not signed by a user and
+// no fee is charged for them — so the generic EIP-1559 formulas resolve their price to
+// 0. Reporting 0 breaks consumers that model every transaction as burning
+// base_fee * gas_used. Blockscout computes a block's reward as
+//
+//	Σ(gas_used * gas_price) − base_fee_per_gas * Σ(gas_used)
+//
+// which goes negative for blocks whose only content is derived txs, even though such a
+// block moves no value at all: nothing is paid to the proposer and nothing is burnt.
+//
+// Reporting exactly the base fee — the effective price of a transaction that adds no
+// priority tip — makes that arithmetic net to zero, which matches the chain's actual
+// economics. Both the transaction object's `gasPrice` and the receipt's
+// `effectiveGasPrice` must use this so the two agree.
+//
+// When the base fee is unavailable (pruned node), the reconstructed tx's own price is
+// returned rather than inventing one.
+func DerivedTxGasPrice(tx *ethtypes.Transaction, baseFee *big.Int) *big.Int {
+	if baseFee == nil {
+		if tx == nil {
+			return big.NewInt(0)
+		}
+		return tx.GasPrice()
+	}
+	return new(big.Int).Set(baseFee)
 }
 
 // effectiveGasPrice computes the transaction gas fee, based on the given basefee value.

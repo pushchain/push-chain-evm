@@ -13,6 +13,7 @@ import (
 	ethtypes "github.com/ethereum/go-ethereum/core/types"
 
 	"github.com/cosmos/evm/server/config"
+	"github.com/cosmos/evm/x/vm/statedb"
 	"github.com/cosmos/evm/x/vm/types"
 
 	errorsmod "cosmossdk.io/errors"
@@ -22,15 +23,9 @@ import (
 )
 
 // CallEVM performs a smart contract method call using given args.
-func (k Keeper) CallEVM(
-	ctx sdk.Context,
-	abi abi.ABI,
-	from, contract common.Address,
-	commit bool,
-	gasCap *big.Int,
-	method string,
-	args ...interface{},
-) (*types.MsgEthereumTxResponse, error) {
+// Note: if you call this from a precompile context, ensure that
+// you use the existing stateDB.
+func (k Keeper) CallEVM(ctx sdk.Context, stateDB *statedb.StateDB, abi abi.ABI, from, contract common.Address, commit, callFromPrecompile bool, gasCap *big.Int, method string, args ...interface{}) (*types.MsgEthereumTxResponse, error) {
 	data, err := abi.Pack(method, args...)
 	if err != nil {
 		return nil, errorsmod.Wrap(
@@ -39,7 +34,7 @@ func (k Keeper) CallEVM(
 		)
 	}
 
-	resp, err := k.CallEVMWithData(ctx, from, &contract, data, commit, gasCap)
+	resp, err := k.CallEVMWithData(ctx, stateDB, from, &contract, data, commit, callFromPrecompile, gasCap)
 	if err != nil {
 		return resp, errorsmod.Wrapf(err, "contract call failed: method '%s', contract '%s'", method, contract)
 	}
@@ -47,14 +42,9 @@ func (k Keeper) CallEVM(
 }
 
 // CallEVMWithData performs a smart contract method call using contract data.
-func (k Keeper) CallEVMWithData(
-	ctx sdk.Context,
-	from common.Address,
-	contract *common.Address,
-	data []byte,
-	commit bool,
-	gasCap *big.Int,
-) (*types.MsgEthereumTxResponse, error) {
+// Note: if you call this from a precompile context, ensure that
+// you use the existing stateDB.
+func (k Keeper) CallEVMWithData(ctx sdk.Context, stateDB *statedb.StateDB, from common.Address, contract *common.Address, data []byte, commit bool, callFromPrecompile bool, gasCap *big.Int) (*types.MsgEthereumTxResponse, error) {
 	nonce, err := k.accountKeeper.GetSequence(ctx, from.Bytes())
 	if err != nil {
 		return nil, err
@@ -91,27 +81,39 @@ func (k Keeper) CallEVMWithData(
 		AccessList: ethtypes.AccessList{},
 	}
 
-	// Use a cache context so that a reverting EVM call does not commit its state
-	// changes. The cache shares the parent gas meter, so gas is metered against
-	// the caller either way; only the store writes are discarded on failure.
-	tmpCtx, commitState := ctx.CacheContext()
-	res, err := k.ApplyMessage(tmpCtx, msg, nil, commit, true)
+	// v0.6.0: the StateDB is supplied by the caller and ApplyMessage rejects a nil
+	// StateDB (returns ErrNilStateDB). Pass it (and callFromPrecompile) straight
+	// through so that contract — and the precompile snapshot/flush chain — is
+	// preserved.
+	//
+	// This replaces the ctx.CacheContext() sandbox the pre-v0.6.0 code wrapped
+	// around ApplyMessage: state isolation on a revert is now the StateDB's
+	// journal/snapshot job, not a store branch. Gas accounting is unaffected —
+	// ApplyMessage never touches ctx.GasMeter(), so the explicit ConsumeGas calls
+	// below remain the only charge to the parent meter, exactly as before.
+	res, err := k.ApplyMessage(ctx, stateDB, msg, nil, commit, callFromPrecompile, true)
 	if err != nil {
 		return nil, err
 	}
 
 	if res.Failed() {
 		// A failed execution still burned real EVM work, so charge it to the parent
-		// Cosmos gas meter exactly like a successful one. Skipping this made a
-		// revert (or a deliberate out-of-gas) a free way to consume block compute.
-		// msg.GasLimit above is config.DefaultGasCap, which a caller-supplied gasCap
-		// can only narrow, so res.GasUsed — which equals the gas limit on
-		// out-of-gas — is bounded by that cap and cannot be inflated by the caller.
+		// Cosmos gas meter exactly like a successful one (F-2026-18824). Skipping
+		// this made a revert (or a deliberate out-of-gas) a free way to consume
+		// block compute. msg.GasLimit above is config.DefaultGasCap, which a
+		// caller-supplied gasCap can only narrow, so res.GasUsed — which equals the
+		// gas limit on out-of-gas — is bounded by that cap and cannot be inflated by
+		// the caller.
+		//
+		// Note we charge exactly res.GasUsed and, unlike upstream, deliberately do
+		// NOT call k.ResetGasMeterAndConsumeGas(ctx, ctx.GasMeter().Limit()):
+		// consuming the full gas limit on a revert can overflow the parent gas
+		// meter. The EVM has already rolled back the reverted call frame via its own
+		// snapshot, so no extra state isolation is required.
 		ctx.GasMeter().ConsumeGas(res.GasUsed, "apply evm message (failed)")
 		return res, errorsmod.Wrap(types.ErrVMExecution, res.VmError)
 	}
 
-	commitState()
 	ctx.GasMeter().ConsumeGas(res.GasUsed, "apply evm message")
 
 	return res, nil
@@ -276,7 +278,11 @@ func (k Keeper) DerivedEVMCallWithData(
 	// thus restricted to be used only inside `ApplyMessage`.
 	tmpCtx, commitState := ctx.CacheContext()
 
-	res, err := k.ApplyMessageWithConfig(tmpCtx, msg, nil, commit, cfg, txConfig, true, nil)
+	// v0.6.0: the StateDB is created by the caller and passed in. Derived txs are
+	// not precompile calls, so callFromPrecompile is false and the StateDB lives
+	// on the cache context (committed only when both tx and hooks succeed).
+	stateDB := statedb.New(tmpCtx, &k, txConfig)
+	res, err := k.ApplyMessageWithConfig(tmpCtx, stateDB, msg, nil, commit, false, cfg, txConfig, true, nil)
 	if err != nil {
 		return nil, err
 	}

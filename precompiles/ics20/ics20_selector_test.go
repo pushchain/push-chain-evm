@@ -29,7 +29,7 @@ func runPrecompile(t *testing.T, input []byte, value *uint256.Int) string {
 	contract := vm.NewContract(common.Address{}, common.Address{}, value, 100_000, nil)
 	contract.Input = input
 
-	bz, err := ics20.NewPrecompile(nil, nil, nil, nil).Run(evm, contract, false)
+	bz, err := ics20.NewPrecompile(nil, nil, nil, nil, nil).Run(evm, contract, false)
 	require.ErrorIs(t, err, vm.ErrExecutionReverted, "precompile errors are always surfaced as a revert")
 
 	return string(bz)

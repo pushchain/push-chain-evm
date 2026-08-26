@@ -10,6 +10,7 @@ import (
 	testconstants "github.com/cosmos/evm/testutil/constants"
 	utiltx "github.com/cosmos/evm/testutil/tx"
 	"github.com/cosmos/evm/x/erc20/types"
+	"github.com/cosmos/evm/x/vm/statedb"
 )
 
 // TestCallEVMWithDataHonoursGasCap is the guard for F-2026-18818.
@@ -31,8 +32,11 @@ func (s *KeeperTestSuite) TestCallEVMWithDataHonoursGasCap() {
 
 	callWithCap := func(gasCap *big.Int) (uint64, error) {
 		s.SetupTest()
+		ctx := s.Network.GetContext()
+		// v0.6.0: the caller supplies the StateDB.
+		stateDB := statedb.New(ctx, s.Network.App.GetEVMKeeper(), statedb.NewEmptyTxConfig())
 		res, err := s.Network.App.GetEVMKeeper().CallEVMWithData(
-			s.Network.GetContext(), types.ModuleAddress, &contractAddr, data, false, gasCap,
+			ctx, stateDB, types.ModuleAddress, &contractAddr, data, false, false, gasCap,
 		)
 		if res == nil {
 			return 0, err

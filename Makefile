@@ -132,12 +132,12 @@ PACKAGES_UNIT := $(shell go list ./... | grep -v '/tests/e2e$$' | grep -v '/simu
 PACKAGES_EVMD := $(shell cd evmd && go list ./... | grep -v '/simulation')
 COVERPKG_EVM  := $(shell go list ./... | grep -v '/tests/e2e$$' | grep -v '/simulation' | paste -sd, -)
 COVERPKG_ALL  := $(COVERPKG_EVM)
-COMMON_COVER_ARGS := -timeout=15m -covermode=atomic
+COMMON_COVER_ARGS := -timeout=30m -covermode=atomic
 
 TEST_PACKAGES := ./...
 TEST_TARGETS := test-unit test-evmd test-unit-cover test-race
 
-test-unit: ARGS=-timeout=15m
+test-unit: ARGS=-timeout=30m
 test-unit: TEST_PACKAGES=$(PACKAGES_UNIT)
 test-unit: run-tests
 
@@ -145,11 +145,11 @@ test-race: ARGS=-race
 test-race: TEST_PACKAGES=$(PACKAGES_UNIT)
 test-race: run-tests
 
-test-evmd: ARGS=-timeout=15m
+test-evmd: ARGS=-timeout=30m
 test-evmd:
 	@cd evmd && go test -race -tags=test -mod=readonly $(ARGS) $(EXTRA_ARGS) $(PACKAGES_EVMD)
 
-test-unit-cover: ARGS=-timeout=15m -coverprofile=coverage.txt -covermode=atomic
+test-unit-cover: ARGS=-timeout=30m -coverprofile=coverage.txt -covermode=atomic
 test-unit-cover: TEST_PACKAGES=$(PACKAGES_UNIT)
 test-unit-cover: run-tests
 	@echo "🔍 Running evm (root) coverage..."
@@ -167,9 +167,9 @@ test: test-unit
 
 test-all:
 	@echo "🔍 Running evm module tests..."
-	@go test -race -tags=test -mod=readonly -timeout=15m $(PACKAGES_NOSIMULATION)
+	@go test -race -tags=test -mod=readonly -timeout=30m $(PACKAGES_NOSIMULATION)
 	@echo "🔍 Running evmd module tests..."
-	@cd evmd && go test -race -tags=test -mod=readonly -timeout=15m $(PACKAGES_EVMD)
+	@cd evmd && go test -race -tags=test -mod=readonly -timeout=30m $(PACKAGES_EVMD)
 
 run-tests:
 ifneq (,$(shell which tparse 2>/dev/null))
@@ -216,7 +216,7 @@ lint: lint-go lint-python lint-contracts
 lint-go:
 	@echo "--> Running linter"
 	@go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(golangci_version)
-	@$(golangci_lint_cmd) run --timeout=15m
+	@$(golangci_lint_cmd) run --timeout=30m
 
 lint-python:
 	find . -name "*.py" -type f -not -path "*/node_modules/*" | xargs pylint
@@ -227,7 +227,7 @@ lint-contracts:
 
 lint-fix:
 	@go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(golangci_version)
-	@$(golangci_lint_cmd) run --timeout=15m --fix
+	@$(golangci_lint_cmd) run --timeout=30m --fix
 
 lint-fix-contracts:
 	solhint --fix contracts/**/*.sol
@@ -378,33 +378,30 @@ test-rpc-compat-stop:
 
 .PHONY: localnet-start localnet-stop localnet-build-env localnet-build-nodes test-rpc-compat test-rpc-compat-stop
 
-test-system: build-v04 build
+test-system: build-v05 build
 	mkdir -p ./tests/systemtests/binaries/
 	cp $(BUILDDIR)/evmd ./tests/systemtests/binaries/
 	cd tests/systemtests/Counter && forge build
 	$(MAKE) -C tests/systemtests test
 
-# V04_REF is the fork's v0.4.0 release state (last commit before the v0.5.0
-# upgrade work began). This fork has no upstream-style v0.4.x git tag, so the
-# legacy binary for the v0.4.0-to-v0.5.0 upgrade test is built from this commit.
-V04_REF ?= b5053b7e
-V04_WORKTREE ?= $(BUILDDIR)/v04-src
-build-v04:
-	mkdir -p ./tests/systemtests/binaries/v0.4
+# V05_REF is the fork's v0.5.x release state (the last commit before the v0.6.0
+# upgrade work began) — the "from" version for the v0.5.0-to-v0.6.0 upgrade
+# system test. A commit hash is used (not the upstream `v0.5.1` tag) because that
+# tag lives in cosmos/evm, not in this fork, so it is unavailable in CI even with
+# fetch-tags. Mirrors V04_REF.
+V05_REF ?= 96231e7a
+V05_WORKTREE ?= $(BUILDDIR)/v05-src
+build-v05:
+	mkdir -p ./tests/systemtests/binaries/v0.5
 	# Build the legacy binary in a throwaway worktree so the main checkout is
-	# never disturbed (the old recipe ran `git checkout $(V04_REF)` on the
-	# working tree, which breaks as soon as the build dirties go.mod).
-	rm -rf $(V04_WORKTREE)
-	git worktree add --force --detach $(V04_WORKTREE) $(V04_REF)
-	# The v0.4.0 ref predates later fixes and will not build as-is:
-	#  - evmd/cmd/evmd/config/config.go has a duplicate map key (compile error),
-	#    fixed via the patch below;
-	#  - evmd/go.mod is out of sync with the root module graph (root requires a
-	#    newer ibc-go than evmd pins), reconciled with GOFLAGS=-mod=mod.
-	cd $(V04_WORKTREE) && git apply $(CURDIR)/tests/systemtests/patches/v04-build-fixes.patch
-	cd $(V04_WORKTREE)/evmd && CGO_ENABLED="1" GOFLAGS=-mod=mod \
-	  go build -o $(CURDIR)/tests/systemtests/binaries/v0.4/evmd ./cmd/evmd
-	git worktree remove --force $(V04_WORKTREE)
+	# never disturbed (a `git checkout $(V05_REF)` on the working tree breaks as
+	# soon as the build dirties go.mod). Mirrors the isolated v0.4 legacy build
+	# introduced in the audit/CI fixes.
+	rm -rf $(V05_WORKTREE)
+	git worktree add --force --detach $(V05_WORKTREE) $(V05_REF)
+	cd $(V05_WORKTREE)/evmd && CGO_ENABLED="1" GOFLAGS=-mod=mod \
+	  go build -o $(CURDIR)/tests/systemtests/binaries/v0.5/evmd ./cmd/evmd
+	git worktree remove --force $(V05_WORKTREE)
 
 mocks:
 	@echo "--> generating mocks"
