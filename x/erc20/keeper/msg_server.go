@@ -110,6 +110,11 @@ func (k Keeper) convertERC20IntoCoinsForNativeToken(
 		}
 	}
 
+	// Check for unexpected `Approval` event in logs
+	if err := validateApprovalEventDoesNotExist(res.Logs); err != nil {
+		return nil, err
+	}
+
 	// Check expected escrow balance after transfer execution
 	// NOTE: coin fields already validated in the ValidateBasic() of the message
 	coins := sdk.Coins{sdk.Coin{Denom: pair.Denom, Amount: msg.Amount}}
@@ -318,6 +323,11 @@ func (k Keeper) convertCoinNativeERC20(
 		if !unpackedRet.Value {
 			return sdkerrors.Wrap(errortypes.ErrLogic, "failed to execute unescrow tokens from user")
 		}
+	}
+
+	// Check for unexpected `Approval` event in logs
+	if err := validateApprovalEventDoesNotExist(res.Logs); err != nil {
+		return err
 	}
 
 	// Check expected Receiver balance after transfer execution

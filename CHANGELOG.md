@@ -44,6 +44,13 @@
   the executor with its signature never checked, letting a victim-signed transaction be replayed as
   the victim. `VerifySender` is now required before `ApplyTransaction`, so `From` is always the
   ECDSA-recovered signer regardless of how the message arrived.
+- Reject a `x/erc20` conversion whose token `transfer` emits an unexpected `Approval` event. Both
+  native-ERC20 convert directions escrow the token and mint (or burn) the paired coins, checking
+  only that the transfer succeeded and that the balance moved by the right amount. A registered
+  token that also grants a third party an allowance over the recipient satisfies both checks: the
+  escrow only drains later, when that allowance is spent, leaving the minted coins unbacked. The
+  `validateApprovalEventDoesNotExist` guard, already documented by both convert doc-comments but
+  never called, now runs on both paths.
 - Charge the parent Cosmos gas meter for failed EVM calls in `CallEVMWithData` and
   `DerivedEVMCallWithData`. Both functions returned on `res.Failed()` before reaching
   `ctx.GasMeter().ConsumeGas(res.GasUsed)`, so a reverting — or deliberately out-of-gas —
