@@ -10,6 +10,12 @@
 
 ### BUG FIXES
 
+- Honour the `gasCap` argument in `CallEVMWithData`. The parameter was accepted and then ignored -
+  `GasLimit` was hardcoded to `config.DefaultGasCap` - so callers passing a cap to sandbox EVM work
+  (the IBC callback keeper passes its remaining Cosmos gas) got a message that could burn up to 25M
+  gas regardless. `DefaultGasCap` remains the ceiling, so a caller can only narrow the limit. This
+  matches `DerivedEVMCallWithData` and the shape upstream cosmos/evm settled on. Also routes the
+  timeout callback's EVM call through `cachedCtx`, as the acknowledgement path already does.
 - Run the gov precompile's `getTallyResult` against a throwaway cache. The SDK's `TallyResult` query
   delegates to `Keeper.Tally`, which deletes every vote it counts; that is safe on the SDK's own
   query paths because a gRPC query runs against a context that is never committed, but precompiles
