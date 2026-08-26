@@ -59,12 +59,30 @@ func (k Keeper) CallEVMWithData(
 		return nil, err
 	}
 
+	// Honour the caller's gasCap. Callers that pass one (the IBC callback keeper
+	// passes the remaining Cosmos gas) are trying to sandbox the EVM work; before
+	// F-2026-18818 this parameter was accepted and silently ignored, so the EVM
+	// always ran to DefaultGasCap and could burn far more gas than the caller had
+	// budgeted. DefaultGasCap stays the ceiling, so a caller can only ever narrow
+	// the limit, never widen it. Mirrors DerivedEVMCallWithData, and matches the
+	// shape upstream cosmos/evm settled on.
+	gasLimit := config.DefaultGasCap
+	if gasCap != nil && gasCap.Sign() > 0 {
+		// A gasCap wider than uint64 cannot be a meaningful limit; fall back to
+		// the default ceiling rather than truncating it.
+		if gasCap.BitLen() <= 64 {
+			if provided := gasCap.Uint64(); provided < gasLimit {
+				gasLimit = provided
+			}
+		}
+	}
+
 	msg := core.Message{
 		From:       from,
 		To:         contract,
 		Nonce:      nonce,
 		Value:      big.NewInt(0),
-		GasLimit:   config.DefaultGasCap,
+		GasLimit:   gasLimit,
 		GasPrice:   big.NewInt(0),
 		GasTipCap:  big.NewInt(0),
 		GasFeeCap:  big.NewInt(0),
@@ -85,9 +103,9 @@ func (k Keeper) CallEVMWithData(
 		// A failed execution still burned real EVM work, so charge it to the parent
 		// Cosmos gas meter exactly like a successful one. Skipping this made a
 		// revert (or a deliberate out-of-gas) a free way to consume block compute.
-		// msg.GasLimit above is the hardcoded config.DefaultGasCap, so res.GasUsed
-		// — which equals the gas limit on out-of-gas — is bounded by that cap and
-		// cannot be inflated by the caller.
+		// msg.GasLimit above is config.DefaultGasCap, which a caller-supplied gasCap
+		// can only narrow, so res.GasUsed — which equals the gas limit on
+		// out-of-gas — is bounded by that cap and cannot be inflated by the caller.
 		ctx.GasMeter().ConsumeGas(res.GasUsed, "apply evm message (failed)")
 		return res, errorsmod.Wrap(types.ErrVMExecution, res.VmError)
 	}

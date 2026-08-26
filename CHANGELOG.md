@@ -10,6 +10,12 @@
 
 ### BUG FIXES
 
+- Honour the `gasCap` argument in `CallEVMWithData`. The parameter was accepted and then ignored -
+  `GasLimit` was hardcoded to `config.DefaultGasCap` - so callers passing a cap to sandbox EVM work
+  (the IBC callback keeper passes its remaining Cosmos gas) got a message that could burn up to 25M
+  gas regardless. `DefaultGasCap` remains the ceiling, so a caller can only narrow the limit. This
+  matches `DerivedEVMCallWithData` and the shape upstream cosmos/evm settled on. Also routes the
+  timeout callback's EVM call through `cachedCtx`, as the acknowledgement path already does.
 - Resolve the ABI method at the top of every stateful precompile's `Run`, before `RunNativeAction`
   is entered. The native-action preamble takes a cache context, snapshots the multi-store and
   commits the state DB cache - replaying the caller's entire dirty account and storage set - and
