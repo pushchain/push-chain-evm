@@ -2,6 +2,7 @@ package keeper
 
 import (
 	"encoding/json"
+	"math"
 	"math/big"
 	"strconv"
 
@@ -197,6 +198,20 @@ func (k Keeper) DerivedEVMCallWithData(
 		gasCap = gasRes.Gas
 	}
 	if gasLimit != nil {
+		// Reject a limit that does not fit in uint64 instead of truncating it.
+		// big.Int.Uint64 is documented as undefined for values that do not fit and
+		// in practice returns the low 64 bits, so a payload declaring 2^64+5 would
+		// silently be handed 5 gas and fail with a misleading out-of-gas error.
+		// Node-side validation bounds UniversalPayload.GasLimit to uint256, so
+		// values at or above 2^64 do reach this call. IsUint64 also rejects a
+		// negative limit, for which Uint64 is equally undefined.
+		if !gasLimit.IsUint64() {
+			return nil, errorsmod.Wrapf(
+				types.ErrInvalidGasLimit,
+				"gas limit %s does not fit in uint64 (max %d)",
+				gasLimit, uint64(math.MaxUint64),
+			)
+		}
 		// Clamp the caller-supplied limit to DefaultGasCap. The failure path below
 		// charges res.GasUsed to the parent Cosmos gas meter, and on out-of-gas
 		// res.GasUsed equals this cap — so an unclamped caller value would let the
