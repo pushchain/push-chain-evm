@@ -228,13 +228,52 @@ func (k Keeper) ConvertCoin(
 }
 
 // ConvertCoinNativeERC20 handles the coin conversion for a native ERC20 token
-// pair:
+// pair. It runs the conversion atomically: the bank escrow, the EVM transfer and
+// the burn either all commit or none of them do.
+//
+// The atomicity is load-bearing, not cosmetic. The body escrows coins onto the
+// module account before calling the EVM, and CallEVM caches only the EVM
+// execution — so on a VM failure the discarded EVM cache used to leave the bank
+// escrow applied, stranding the sender's coins on the erc20 module account with
+// no user-facing way to reclaim them. The IBC refund path (see
+// ConvertCoinToERC20FromPacket) swallows this error and commits the block, which
+// made that stranding permanent (F-2026-18819).
+func (k Keeper) ConvertCoinNativeERC20(
+	ctx sdk.Context,
+	pair types.TokenPair,
+	amount math.Int,
+	receiver common.Address,
+	sender sdk.AccAddress,
+) error {
+	// CacheContext branches the multistore and installs a fresh EventManager;
+	// writeCache replays those events onto the parent and commits the branch.
+	// Nothing is written unless the whole conversion succeeded.
+	//
+	// Note the gas meter is *shared* with the parent, so work done on a
+	// discarded branch is still charged. That is intended — a failed conversion
+	// should not be free.
+	cacheCtx, writeCache := ctx.CacheContext()
+
+	if err := k.convertCoinNativeERC20(cacheCtx, pair, amount, receiver, sender); err != nil {
+		// Branch discarded: the escrow, the EVM state and any events go with it.
+		return err
+	}
+
+	writeCache()
+
+	return nil
+}
+
+// convertCoinNativeERC20 is the non-atomic body of ConvertCoinNativeERC20:
 //   - escrow Coins on module account
 //   - unescrow Tokens that have been previously escrowed with ConvertERC20 and send to receiver
 //   - burn escrowed Coins
 //   - check if token balance increased by amount
 //   - check for unexpected `Approval` event in logs
-func (k Keeper) ConvertCoinNativeERC20(
+//
+// It mutates ctx directly and must only be called on a branched context — see
+// ConvertCoinNativeERC20.
+func (k Keeper) convertCoinNativeERC20(
 	ctx sdk.Context,
 	pair types.TokenPair,
 	amount math.Int,

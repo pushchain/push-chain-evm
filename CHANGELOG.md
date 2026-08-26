@@ -19,6 +19,13 @@
   or `werc20` four random bytes to have the whole set replayed for free, up to 20 times per
   transaction. The check goes through the new `cmn.ResolveMethod`, which `SetupABI` now also uses,
   so the fallback/receive special cases WERC20 depends on keep working and the revert is unchanged.
+- Make `ConvertCoinNativeERC20` atomic. It escrowed the sender's coins onto the erc20 module
+  account before calling the EVM, and `CallEVMWithData` caches only the EVM execution, so a VM
+  failure discarded the EVM cache while leaving the bank escrow committed. On the IBC error-ACK /
+  timeout refund path, which deliberately swallows a conversion error so a failed re-wrap cannot
+  undo the refund, that stranded the sender's coins on the module account permanently - contradicting
+  the `OnAcknowledgementPacket` / `OnTimeoutPacket` comments promising the user keeps the bank token.
+  The escrow, the EVM transfer and the burn now all run on a branched context and commit together.
 - Run the gov precompile's `getTallyResult` against a throwaway cache. The SDK's `TallyResult` query
   delegates to `Keeper.Tally`, which deletes every vote it counts; that is safe on the SDK's own
   query paths because a gRPC query runs against a context that is never committed, but precompiles
@@ -31,6 +38,15 @@
   the executor with its signature never checked, letting a victim-signed transaction be replayed as
   the victim. `VerifySender` is now required before `ApplyTransaction`, so `From` is always the
   ECDSA-recovered signer regardless of how the message arrived.
+- Charge the parent Cosmos gas meter for failed EVM calls in `CallEVMWithData` and
+  `DerivedEVMCallWithData`. Both functions returned on `res.Failed()` before reaching
+  `ctx.GasMeter().ConsumeGas(res.GasUsed)`, so a reverting — or deliberately out-of-gas —
+  internal call performed real EVM work that cost the enclosing Cosmos transaction nothing
+  beyond the incidental KV-store gas. `DerivedEVMCallWithData` additionally clamps a
+  caller-supplied `gasLimit` to `config.DefaultGasCap`; on an out-of-gas halt `res.GasUsed`
+  equals the gas cap, so without the clamp the caller would pick how much gas the enclosing
+  transaction is forced to consume and could panic it with `OutOfGas`. `CallEVMWithData`
+  needs no clamp — its message gas limit is already the hardcoded `config.DefaultGasCap`.
 - [\#690](https://github.com/cosmos/evm/pull/690) Fix Ledger hardware wallet support for coin type 60.
 - [\#769](https://github.com/cosmos/evm/pull/769) Fix erc20 ibc middleware to not to validate sender address format.
 - [\#790](https://github.com/cosmos/evm/pull/790) fix panic in historical query due to missing EvmCoinInfo.
