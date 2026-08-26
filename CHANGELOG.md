@@ -72,6 +72,15 @@ Follow the [migration document](docs/migrations/v0.5.x_to_v0.6.0.md) for upgrade
   the executor with its signature never checked, letting a victim-signed transaction be replayed as
   the victim. `VerifySender` is now required before `ApplyTransaction`, so `From` is always the
   ECDSA-recovered signer regardless of how the message arrived.
+- Clamp the fee market's cumulative gas wanted instead of failing the block. `EndBlock` converted
+  both the block's cumulative `gasWanted` and its `gasUsed` to `int64` and returned an error when
+  either did not fit. `gasWanted` is an unchecked uint64 sum of per-transaction declarations, and
+  under `max_gas: -1` nothing bounds a single declaration, so two transactions declaring `MaxInt64`
+  sum into `(MaxInt64, MaxUint64]` with neither being individually rejectable. An error out of
+  `EndBlock` surfaces through `FinalizeBlock` after the block has been decided, leaving CometBFT at
+  height H and the application at H-1. Both values are now clamped to `MaxInt64` and logged.
+  `AddTransientGasWanted` also saturates instead of wrapping, so the total can never silently roll
+  over to a small number.
 - Reject a `x/erc20` conversion whose token `transfer` emits an unexpected `Approval` event. Both
   native-ERC20 convert directions escrow the token and mint (or burn) the paired coins, checking
   only that the transfer succeeded and that the balance moved by the right amount. A registered
