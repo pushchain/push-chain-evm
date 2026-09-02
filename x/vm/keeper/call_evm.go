@@ -152,7 +152,11 @@ func (k Keeper) DerivedEVMCall(
 
 	resp, err := k.DerivedEVMCallWithData(ctx, from, &contract, data, commit, gasless, isModuleSender, value, gasLimit, manualNonce)
 	if err != nil {
-		return nil, errorsmod.Wrapf(err, "contract call failed: method '%s', contract '%s'", method, contract)
+		// Propagate resp alongside the error. On a VM failure (revert / out of gas)
+		// DerivedEVMCallWithData still returns a response carrying GasUsed; dropping
+		// it here leaves callers that charge for the gas a call actually burned with
+		// nothing to charge against. CallEVM above propagates for the same reason.
+		return resp, errorsmod.Wrapf(err, "contract call failed: method '%s', contract '%s'", method, contract)
 	}
 	return resp, nil
 }
